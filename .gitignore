@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# TLS certs (auto-generated)
+*.pem
+*.crt
+*.key
+!trustchain/proto/*.key
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment / secrets
+.env
+.env.*
+credentials.json
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Distribution
+*.tar.gz
+*.whl

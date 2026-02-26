@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "trustchain-gateway": {
+      "command": "python",
+      "args": [
+        "G:/Projects/blockchains/trustchain-agent-os/examples/run_gateway.py"
+      ],
+      "env": {
+        "TRUSTCHAIN_STORE_PATH": "G:/Projects/blockchains/trustchain-agent-os/data/records.json",
+        "TRUSTCHAIN_IDENTITY_PATH": "G:/Projects/blockchains/trustchain-agent-os/data/gateway.key"
+      }
+    }
+  }
+}
