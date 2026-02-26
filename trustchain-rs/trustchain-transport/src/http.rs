@@ -15,11 +15,15 @@ use tokio::sync::Mutex;
 use trustchain_core::{BlockStore, HalfBlock, TrustChainProtocol};
 
 use crate::discovery::PeerDiscovery;
+use crate::message::{MessageType, TransportMessage, block_to_bytes, bytes_to_block};
+use crate::quic::QuicTransport;
 
 /// Shared application state for HTTP handlers, generic over BlockStore.
 pub struct AppState<S: BlockStore + 'static> {
     pub protocol: Arc<Mutex<TrustChainProtocol<S>>>,
     pub discovery: Arc<PeerDiscovery>,
+    /// QUIC transport for P2P communication (optional — None in tests).
+    pub quic: Option<Arc<QuicTransport>>,
 }
 
 // Manual Clone impl — Arc handles the cloning, S doesn't need Clone.
@@ -28,6 +32,7 @@ impl<S: BlockStore + 'static> Clone for AppState<S> {
         Self {
             protocol: self.protocol.clone(),
             discovery: self.discovery.clone(),
+            quic: self.quic.clone(),
         }
     }
 }
@@ -52,6 +57,11 @@ pub struct ProposeRequest {
 #[derive(Serialize)]
 pub struct ProposeResponse {
     pub proposal: HalfBlock,
+    /// The agreement block, if P2P handshake completed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agreement: Option<HalfBlock>,
+    /// Whether the full P2P handshake completed.
+    pub completed: bool,
 }
 
 /// Request for receiving a proposal from a remote node.
@@ -169,17 +179,103 @@ async fn handle_propose<S: BlockStore + 'static>(
     State(state): State<AppState<S>>,
     Json(req): Json<ProposeRequest>,
 ) -> Result<Json<ProposeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let mut proto = state.protocol.lock().await;
+    // Step 1: Create proposal locally.
+    let proposal = {
+        let mut proto = state.protocol.lock().await;
+        proto.create_proposal(&req.counterparty_pubkey, req.transaction, None)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e.to_string() })))?
+    };
 
-    match proto.create_proposal(&req.counterparty_pubkey, req.transaction, None) {
-        Ok(proposal) => Ok(Json(ProposeResponse { proposal })),
-        Err(e) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )),
+    // Step 2: Look up the counterparty's address and send via QUIC P2P.
+    let peer = state.discovery.get_peer(&req.counterparty_pubkey).await;
+    let quic = state.quic.as_ref();
+
+    if let (Some(peer), Some(quic)) = (peer, quic) {
+        // Parse the peer's QUIC address.
+        let quic_addr = peer_quic_addr(&peer.address);
+        if let Ok(addr) = quic_addr {
+            // Build TransportMessage with the proposal.
+            let our_pubkey = {
+                let proto = state.protocol.lock().await;
+                proto.pubkey()
+            };
+            let msg = TransportMessage::new(
+                MessageType::Proposal,
+                our_pubkey,
+                block_to_bytes(&proposal),
+                uuid_v4(),
+            );
+
+            let msg_bytes = serde_json::to_vec(&msg).unwrap_or_default();
+
+            // Send proposal over QUIC and wait for agreement response.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                quic.send_message(addr, &msg_bytes),
+            ).await {
+                Ok(Ok(response_bytes)) => {
+                    // Try to parse the response as a TransportMessage containing an agreement.
+                    if let Ok(resp_msg) = serde_json::from_slice::<TransportMessage>(&response_bytes) {
+                        if resp_msg.message_type == MessageType::Agreement {
+                            if let Ok(agreement) = bytes_to_block(&resp_msg.payload) {
+                                // Store the agreement locally.
+                                let mut proto = state.protocol.lock().await;
+                                match proto.receive_agreement(&agreement) {
+                                    Ok(_) => {
+                                        return Ok(Json(ProposeResponse {
+                                            proposal,
+                                            agreement: Some(agreement),
+                                            completed: true,
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        log::warn!("P2P agreement invalid: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Response wasn't a valid agreement — check if it's an error.
+                    if let Ok(err_resp) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
+                        if let Some(err_msg) = err_resp.get("error").and_then(|v| v.as_str()) {
+                            log::warn!("peer rejected proposal: {err_msg}");
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    log::warn!("QUIC send failed: {e}");
+                }
+                Err(_) => {
+                    log::warn!("QUIC proposal timed out");
+                }
+            }
+        }
     }
+
+    // P2P not available or failed — return proposal only.
+    Ok(Json(ProposeResponse {
+        proposal,
+        agreement: None,
+        completed: false,
+    }))
+}
+
+/// Derive the QUIC address from a peer's HTTP address.
+/// Peers store HTTP addresses like "127.0.0.1:8202" — QUIC is on port - 2.
+fn peer_quic_addr(http_addr: &str) -> Result<std::net::SocketAddr, String> {
+    let addr = http_addr
+        .strip_prefix("http://")
+        .unwrap_or(http_addr);
+    addr.parse::<std::net::SocketAddr>()
+        .map(|a| std::net::SocketAddr::new(a.ip(), a.port() - 2))
+        .map_err(|e| format!("invalid peer address: {e}"))
+}
+
+/// Generate a simple request ID.
+fn uuid_v4() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    format!("{:016x}{:016x}", rng.gen::<u64>(), rng.gen::<u64>())
 }
 
 /// Receive a proposal from a remote node — validates, stores, and returns agreement.
@@ -302,6 +398,7 @@ mod tests {
         AppState {
             protocol: Arc::new(Mutex::new(protocol)),
             discovery: Arc::new(discovery),
+            quic: None,
         }
     }
 

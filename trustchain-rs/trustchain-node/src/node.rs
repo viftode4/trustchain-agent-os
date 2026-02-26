@@ -93,11 +93,12 @@ impl Node {
         });
         tracing::info!(%grpc_addr, "gRPC service ready");
 
-        // Start HTTP REST API.
+        // Start HTTP REST API — with QUIC transport for P2P proposal flow.
         let http_addr: SocketAddr = self.config.http_addr.parse()?;
         let http_state = AppState {
             protocol: self.protocol.clone(),
             discovery: self.discovery.clone(),
+            quic: Some(quic_accept_handle.1.clone()),
         };
         let http_handle = tokio::spawn(async move {
             if let Err(e) = start_http_server(http_addr, http_state).await {
