@@ -111,6 +111,21 @@ impl<S: BlockStore> TrustChainProtocol<S> {
         // Check sequence continuity if we know this peer.
         let known_latest = self.store.get_latest_seq(&proposal.public_key)?;
         if known_latest > 0 {
+            // If we already have this exact sequence, check if it's the same block (idempotent).
+            if proposal.sequence_number <= known_latest {
+                if let Ok(Some(existing)) = self.store.get_block(&proposal.public_key, proposal.sequence_number) {
+                    if existing.block_hash == proposal.block_hash {
+                        return Ok(true); // Already stored, idempotent.
+                    }
+                }
+                // Different block at same or earlier seq — reject.
+                return Err(TrustChainError::sequence_gap(
+                    &proposal.public_key,
+                    known_latest + 1,
+                    proposal.sequence_number,
+                ));
+            }
+
             let expected_seq = known_latest + 1;
             if proposal.sequence_number != expected_seq {
                 return Err(TrustChainError::sequence_gap(
