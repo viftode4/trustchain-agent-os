@@ -204,7 +204,7 @@ tests/                   # 335 tests
 pip install trustchain-agent-os
 
 # Or from source
-git clone https://github.com/levlaz/trustchain-agent-os.git
+git clone https://github.com/viftode4/trustchain-agent-os.git
 cd trustchain-agent-os
 pip install -e ".[dev]"
 
@@ -212,12 +212,26 @@ pip install -e ".[dev]"
 python -m pytest tests/ -v  # 335 tests, ~40s
 ```
 
+## Research Foundation
+
+This implementation is based on the TrustChain protocol developed at the [TU Delft Blockchain Lab](https://www.tudelft.nl/ewi/over-de-faculteit/afdelingen/software-technology/distributed-systems/people/johan-pouwelse) (Distributed Systems Group, Software Technology Department).
+
+**Core paper**: Otte, de Vos, Pouwelse — [TrustChain: A Sybil-resistant scalable blockchain](https://doi.org/10.1016/j.future.2020.01.031) (Future Generation Computer Systems, 2020)
+
+Key contributions from the paper that this implementation realizes:
+- **Half-block architecture** (Section 3.1) — Each party creates and signs only their own block. No global consensus needed for bilateral interactions.
+- **NetFlow-based Sybil resistance** (Section 4) — Trust is computed as max-flow from seed nodes through the transaction graph. Sybil identities with no legitimate transaction paths receive zero trust, regardless of how many fake interactions they create among themselves.
+- **Scalability through bilateral accountability** — Unlike global blockchains (Bitcoin, Ethereum), TrustChain scales linearly: each transaction only involves two parties. No miners, no gas fees, no block limits.
+
+**Extension for AI agents**: This implementation adds trust-gated service calls, MCP gateway integration, framework adapters (LangGraph, CrewAI, AutoGen, ElizaOS, Google ADK, OpenAI Agents), and a dual-stack transport architecture (QUIC P2P + gRPC + HTTP/3) — making TrustChain the trust substrate for the emerging AI agent economy.
+
 ## References
 
 - Otte, de Vos, Pouwelse — [TrustChain: A Sybil-resistant scalable blockchain](https://doi.org/10.1016/j.future.2020.01.031) (Future Generation Computer Systems, 2020)
-- [IETF draft-pouwelse-trustchain-01](https://datatracker.ietf.org/doc/draft-pouwelse-trustchain/)
-- [py-ipv8](https://github.com/Tribler/py-ipv8) — TU Delft reference implementation
-- [kotlin-ipv8](https://github.com/Tribler/kotlin-ipv8) — Mobile implementation
+- [IETF draft-pouwelse-trustchain-01](https://datatracker.ietf.org/doc/draft-pouwelse-trustchain/) — Protocol specification
+- [py-ipv8](https://github.com/Tribler/py-ipv8) — TU Delft reference implementation (Python)
+- [kotlin-ipv8](https://github.com/Tribler/kotlin-ipv8) — Mobile implementation (Kotlin/Android)
+- Kempen, Pouwelse — [Offline Digital Euro: A CBDC Using Groth-Sahai Proofs](https://repository.tudelft.nl/) — Settlement layer research
 
 ## License
 
