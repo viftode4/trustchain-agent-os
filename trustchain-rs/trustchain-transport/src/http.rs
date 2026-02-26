@@ -12,17 +12,24 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use trustchain_core::{
-    BlockStore, HalfBlock, MemoryBlockStore, TrustChainProtocol,
-};
+use trustchain_core::{BlockStore, HalfBlock, TrustChainProtocol};
 
 use crate::discovery::PeerDiscovery;
 
-/// Shared application state for HTTP handlers.
-#[derive(Clone)]
-pub struct AppState {
-    pub protocol: Arc<Mutex<TrustChainProtocol<MemoryBlockStore>>>,
+/// Shared application state for HTTP handlers, generic over BlockStore.
+pub struct AppState<S: BlockStore + 'static> {
+    pub protocol: Arc<Mutex<TrustChainProtocol<S>>>,
     pub discovery: Arc<PeerDiscovery>,
+}
+
+// Manual Clone impl — Arc handles the cloning, S doesn't need Clone.
+impl<S: BlockStore + 'static> Clone for AppState<S> {
+    fn clone(&self) -> Self {
+        Self {
+            protocol: self.protocol.clone(),
+            discovery: self.discovery.clone(),
+        }
+    }
 }
 
 /// Response for status endpoint.
@@ -45,6 +52,35 @@ pub struct ProposeRequest {
 #[derive(Serialize)]
 pub struct ProposeResponse {
     pub proposal: HalfBlock,
+}
+
+/// Request for receiving a proposal from a remote node.
+#[derive(Deserialize)]
+pub struct ReceiveProposalRequest {
+    pub proposal: HalfBlock,
+}
+
+/// Response for receiving a proposal — returns the agreement if accepted.
+#[derive(Serialize)]
+pub struct ReceiveProposalResponse {
+    pub accepted: bool,
+    pub agreement: Option<HalfBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Request for receiving an agreement from a remote node.
+#[derive(Deserialize)]
+pub struct ReceiveAgreementRequest {
+    pub agreement: HalfBlock,
+}
+
+/// Response for receiving an agreement.
+#[derive(Serialize)]
+pub struct ReceiveAgreementResponse {
+    pub accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Query parameters for crawl endpoint.
@@ -71,22 +107,31 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+#[derive(Serialize)]
+pub struct PeerInfoResponse {
+    pub pubkey: String,
+    pub address: String,
+    pub latest_seq: u64,
+}
+
 /// Build the Axum router with all REST endpoints.
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router<S: BlockStore + Send + 'static>(state: AppState<S>) -> Router {
     Router::new()
-        .route("/status", get(handle_status))
-        .route("/propose", post(handle_propose))
-        .route("/chain/{pubkey}", get(handle_get_chain))
-        .route("/block/{pubkey}/{seq}", get(handle_get_block))
-        .route("/crawl/{pubkey}", get(handle_crawl))
-        .route("/peers", get(handle_get_peers))
+        .route("/status", get(handle_status::<S>))
+        .route("/propose", post(handle_propose::<S>))
+        .route("/receive_proposal", post(handle_receive_proposal::<S>))
+        .route("/receive_agreement", post(handle_receive_agreement::<S>))
+        .route("/chain/{pubkey}", get(handle_get_chain::<S>))
+        .route("/block/{pubkey}/{seq}", get(handle_get_block::<S>))
+        .route("/crawl/{pubkey}", get(handle_crawl::<S>))
+        .route("/peers", get(handle_get_peers::<S>))
         .with_state(state)
 }
 
 /// Start the HTTP server.
-pub async fn start_http_server(
+pub async fn start_http_server<S: BlockStore + 'static>(
     addr: SocketAddr,
-    state: AppState,
+    state: AppState<S>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let router = build_router(state);
 
@@ -102,8 +147,8 @@ pub async fn start_http_server(
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_status(
-    State(state): State<AppState>,
+async fn handle_status<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
 ) -> Result<Json<StatusResponse>, StatusCode> {
     let proto = state.protocol.lock().await;
     let pubkey = proto.pubkey();
@@ -120,8 +165,8 @@ async fn handle_status(
     }))
 }
 
-async fn handle_propose(
-    State(state): State<AppState>,
+async fn handle_propose<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
     Json(req): Json<ProposeRequest>,
 ) -> Result<Json<ProposeResponse>, (StatusCode, Json<ErrorResponse>)> {
     let mut proto = state.protocol.lock().await;
@@ -137,8 +182,58 @@ async fn handle_propose(
     }
 }
 
-async fn handle_get_chain(
-    State(state): State<AppState>,
+/// Receive a proposal from a remote node — validates, stores, and returns agreement.
+async fn handle_receive_proposal<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
+    Json(req): Json<ReceiveProposalRequest>,
+) -> Json<ReceiveProposalResponse> {
+    let mut proto = state.protocol.lock().await;
+
+    // Receive and validate the proposal.
+    if let Err(e) = proto.receive_proposal(&req.proposal) {
+        return Json(ReceiveProposalResponse {
+            accepted: false,
+            agreement: None,
+            error: Some(e.to_string()),
+        });
+    }
+
+    // Create agreement.
+    match proto.create_agreement(&req.proposal, None) {
+        Ok(agreement) => Json(ReceiveProposalResponse {
+            accepted: true,
+            agreement: Some(agreement),
+            error: None,
+        }),
+        Err(e) => Json(ReceiveProposalResponse {
+            accepted: false,
+            agreement: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+/// Receive an agreement from a remote node — validates and stores.
+async fn handle_receive_agreement<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
+    Json(req): Json<ReceiveAgreementRequest>,
+) -> Json<ReceiveAgreementResponse> {
+    let mut proto = state.protocol.lock().await;
+
+    match proto.receive_agreement(&req.agreement) {
+        Ok(_) => Json(ReceiveAgreementResponse {
+            accepted: true,
+            error: None,
+        }),
+        Err(e) => Json(ReceiveAgreementResponse {
+            accepted: false,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+async fn handle_get_chain<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
     Path(pubkey): Path<String>,
 ) -> Result<Json<BlocksResponse>, StatusCode> {
     let proto = state.protocol.lock().await;
@@ -149,8 +244,8 @@ async fn handle_get_chain(
     }
 }
 
-async fn handle_get_block(
-    State(state): State<AppState>,
+async fn handle_get_block<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
     Path((pubkey, seq)): Path<(String, u64)>,
 ) -> Result<Json<BlockResponse>, StatusCode> {
     let proto = state.protocol.lock().await;
@@ -161,8 +256,8 @@ async fn handle_get_block(
     }
 }
 
-async fn handle_crawl(
-    State(state): State<AppState>,
+async fn handle_crawl<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
     Path(pubkey): Path<String>,
     Query(params): Query<CrawlQuery>,
 ) -> Result<Json<BlocksResponse>, StatusCode> {
@@ -175,8 +270,8 @@ async fn handle_crawl(
     }
 }
 
-async fn handle_get_peers(
-    State(state): State<AppState>,
+async fn handle_get_peers<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
 ) -> Json<Vec<PeerInfoResponse>> {
     let peers = state.discovery.get_peers().await;
     let response: Vec<PeerInfoResponse> = peers
@@ -190,22 +285,15 @@ async fn handle_get_peers(
     Json(response)
 }
 
-#[derive(Serialize)]
-pub struct PeerInfoResponse {
-    pub pubkey: String,
-    pub address: String,
-    pub latest_seq: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
-    use trustchain_core::Identity;
+    use trustchain_core::{Identity, MemoryBlockStore};
 
-    fn make_test_state() -> AppState {
+    fn make_test_state() -> AppState<MemoryBlockStore> {
         let identity = Identity::from_bytes(&[1u8; 32]);
         let store = MemoryBlockStore::new();
         let protocol = TrustChainProtocol::new(identity.clone(), store);
@@ -275,6 +363,38 @@ mod tests {
         let request = Request::builder()
             .uri("/peers")
             .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_receive_proposal_endpoint() {
+        let state = make_test_state();
+
+        // Create a proposal from Alice to the test node.
+        let alice = Identity::from_bytes(&[2u8; 32]);
+        let test_pubkey = Identity::from_bytes(&[1u8; 32]).pubkey_hex();
+        let proposal = trustchain_core::create_half_block(
+            &alice,
+            1,
+            &test_pubkey,
+            0,
+            trustchain_core::GENESIS_HASH,
+            trustchain_core::BlockType::Proposal,
+            serde_json::json!({"service": "test"}),
+            Some(1000.0),
+        );
+
+        let app = build_router(state);
+        let body = serde_json::json!({ "proposal": proposal });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/receive_proposal")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();

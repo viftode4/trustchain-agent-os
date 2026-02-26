@@ -4,9 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
-use trustchain_core::{
-    BlockStore, HalfBlock, MemoryBlockStore, TrustChainProtocol,
-};
+use trustchain_core::{BlockStore, HalfBlock, TrustChainProtocol};
 
 use crate::discovery::PeerDiscovery;
 use crate::proto;
@@ -48,15 +46,15 @@ pub fn proto_to_block(proto: &proto::HalfBlockProto) -> Result<HalfBlock, Status
     })
 }
 
-/// gRPC service implementation.
-pub struct TrustChainGrpcService {
-    protocol: Arc<Mutex<TrustChainProtocol<MemoryBlockStore>>>,
+/// gRPC service implementation, generic over any BlockStore.
+pub struct TrustChainGrpcService<S: BlockStore + 'static> {
+    protocol: Arc<Mutex<TrustChainProtocol<S>>>,
     discovery: Arc<PeerDiscovery>,
 }
 
-impl TrustChainGrpcService {
+impl<S: BlockStore + 'static> TrustChainGrpcService<S> {
     pub fn new(
-        protocol: Arc<Mutex<TrustChainProtocol<MemoryBlockStore>>>,
+        protocol: Arc<Mutex<TrustChainProtocol<S>>>,
         discovery: Arc<PeerDiscovery>,
     ) -> Self {
         Self {
@@ -67,7 +65,9 @@ impl TrustChainGrpcService {
 }
 
 #[tonic::async_trait]
-impl proto::trust_chain_service_server::TrustChainService for TrustChainGrpcService {
+impl<S: BlockStore + 'static> proto::trust_chain_service_server::TrustChainService
+    for TrustChainGrpcService<S>
+{
     async fn propose(
         &self,
         request: Request<proto::ProposalRequest>,
@@ -194,9 +194,9 @@ impl proto::trust_chain_service_server::TrustChainService for TrustChainGrpcServ
 }
 
 /// Start the gRPC server.
-pub async fn start_grpc_server(
+pub async fn start_grpc_server<S: BlockStore + 'static>(
     addr: std::net::SocketAddr,
-    protocol: Arc<Mutex<TrustChainProtocol<MemoryBlockStore>>>,
+    protocol: Arc<Mutex<TrustChainProtocol<S>>>,
     discovery: Arc<PeerDiscovery>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let service = TrustChainGrpcService::new(protocol, discovery);
