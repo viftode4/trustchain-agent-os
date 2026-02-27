@@ -308,7 +308,7 @@ pub fn validate_block<S: BlockStore>(block: &HalfBlock, store: &S) -> Validation
     let is_next_gap = next_blk.as_ref()
         .map_or(true, |n| n.sequence_number != block.sequence_number + 1);
 
-    let mut level = match (prev_blk.is_some() || block.sequence_number == GENESIS_SEQ, next_blk.is_some()) {
+    let level = match (prev_blk.is_some() || block.sequence_number == GENESIS_SEQ, next_blk.is_some()) {
         (false, false) => ValidationResult::NoInfo,
         (false, true) if is_next_gap => ValidationResult::Partial,
         (false, true) => ValidationResult::PartialPrevious,

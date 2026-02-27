@@ -193,6 +193,26 @@ impl Node {
             }
         });
 
+        // Register ourselves in the discovery layer so peers can find us.
+        let our_http_addr = format!("http://127.0.0.1:{}", http_addr.port());
+        self.discovery.add_peer(
+            pubkey.clone(),
+            our_http_addr,
+            {
+                let proto = self.protocol.lock().await;
+                proto.store().get_latest_seq(&pubkey).unwrap_or(0)
+            },
+        ).await;
+
+        // If running in sidecar mode, log the agent info.
+        if let Some(ref agent_name) = self.config.agent_name {
+            tracing::info!(
+                agent = %agent_name,
+                endpoint = self.config.agent_endpoint.as_deref().unwrap_or("(none)"),
+                "sidecar mode — agent registered"
+            );
+        }
+
         tracing::info!(
             pubkey = &pubkey[..8],
             quic = %quic_local,

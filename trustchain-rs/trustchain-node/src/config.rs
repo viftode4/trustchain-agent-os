@@ -42,6 +42,14 @@ pub struct NodeConfig {
     /// Log level.
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// Agent name (set by sidecar mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+
+    /// Agent's own HTTP endpoint (set by sidecar mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_endpoint: Option<String>,
 }
 
 impl Default for NodeConfig {
@@ -56,6 +64,8 @@ impl Default for NodeConfig {
             bootstrap_nodes: vec![],
             min_signers: default_min_signers(),
             log_level: default_log_level(),
+            agent_name: None,
+            agent_endpoint: None,
         }
     }
 }

@@ -3,6 +3,8 @@
 mod config;
 mod node;
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use trustchain_core::Identity;
 
@@ -32,6 +34,36 @@ enum Commands {
         /// Path to TOML configuration file.
         #[arg(short, long, default_value = "node.toml")]
         config: String,
+    },
+
+    /// Run as a sidecar next to an agent — one command to join the trust network.
+    ///
+    /// Generates identity, starts all services (QUIC, gRPC, HTTP, proxy),
+    /// and prints the HTTP_PROXY env var for the agent to use.
+    Sidecar {
+        /// Agent name (used for data directory: ~/.trustchain/<name>/).
+        #[arg(long)]
+        name: String,
+
+        /// The agent's own HTTP endpoint (e.g. http://localhost:8080).
+        #[arg(long)]
+        endpoint: String,
+
+        /// Base port for services. QUIC=base, gRPC=base+1, HTTP=base+2, proxy=base+3.
+        #[arg(long, default_value = "8200")]
+        port_base: u16,
+
+        /// Bootstrap peer addresses (comma-separated HTTP addresses).
+        #[arg(long, value_delimiter = ',')]
+        bootstrap: Vec<String>,
+
+        /// Data directory. Defaults to ~/.trustchain/<name>/.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Log level.
+        #[arg(long, default_value = "info")]
+        log_level: String,
     },
 
     /// Query a running node's status.
@@ -99,6 +131,83 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!(pubkey = %id.pubkey_hex(), "generated new identity");
                 id
             };
+
+            let node = Node::new(identity, config);
+            node.run().await?;
+        }
+
+        Commands::Sidecar {
+            name,
+            endpoint,
+            port_base,
+            bootstrap,
+            data_dir,
+            log_level,
+        } => {
+            // Resolve data directory: --data-dir or ~/.trustchain/<name>/
+            let data_dir = data_dir.unwrap_or_else(|| {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(home).join(".trustchain").join(&name)
+            });
+
+            // Create data directory.
+            std::fs::create_dir_all(&data_dir)?;
+
+            // Set up tracing/logging.
+            let filter = tracing_subscriber::EnvFilter::try_new(&log_level)
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .init();
+
+            // Load or generate identity.
+            let key_path = data_dir.join("identity.key");
+            let identity = if key_path.exists() {
+                let id = Identity::load(&key_path)?;
+                tracing::info!(pubkey = %id.pubkey_hex(), "loaded identity");
+                id
+            } else {
+                let id = Identity::generate();
+                id.save(&key_path)?;
+                tracing::info!(pubkey = %id.pubkey_hex(), "generated new identity");
+                id
+            };
+
+            // Build config from CLI args.
+            let config = NodeConfig {
+                quic_addr: format!("0.0.0.0:{}", port_base),
+                grpc_addr: format!("0.0.0.0:{}", port_base + 1),
+                http_addr: format!("0.0.0.0:{}", port_base + 2),
+                proxy_addr: format!("127.0.0.1:{}", port_base + 3),
+                key_path,
+                db_path: data_dir.join("trustchain.db"),
+                bootstrap_nodes: bootstrap,
+                agent_name: Some(name.clone()),
+                agent_endpoint: Some(endpoint.clone()),
+                ..NodeConfig::default()
+            };
+
+            // Print banner.
+            let pubkey = identity.pubkey_hex();
+            println!();
+            println!("  TrustChain Sidecar");
+            println!("  ──────────────────────────────────────────");
+            println!("  Agent:     {name}");
+            println!("  Endpoint:  {endpoint}");
+            println!("  Public key: {pubkey}");
+            println!("  Data dir:  {}", data_dir.display());
+            println!();
+            println!("  QUIC:   0.0.0.0:{}", port_base);
+            println!("  gRPC:   0.0.0.0:{}", port_base + 1);
+            println!("  HTTP:   0.0.0.0:{}", port_base + 2);
+            println!("  Proxy:  127.0.0.1:{}", port_base + 3);
+            println!();
+            println!("  Set this in your agent's environment:");
+            println!("    export HTTP_PROXY=http://127.0.0.1:{}", port_base + 3);
+            println!("  ──────────────────────────────────────────");
+            println!();
 
             let node = Node::new(identity, config);
             node.run().await?;
