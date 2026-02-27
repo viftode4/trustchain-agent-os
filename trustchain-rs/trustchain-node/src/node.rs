@@ -152,6 +152,7 @@ impl Node {
             protocol: self.protocol.clone(),
             discovery: self.discovery.clone(),
             quic: Some(quic_accept_handle.1.clone()),
+            agent_endpoint: self.config.agent_endpoint.clone(),
         };
         let http_handle = tokio::spawn(async move {
             if let Err(e) = start_http_server(http_addr, http_state).await {
@@ -203,6 +204,15 @@ impl Node {
                 proto.store().get_latest_seq(&pubkey).unwrap_or(0)
             },
         ).await;
+
+        // Register agent endpoint alias so the proxy can resolve it.
+        if let Some(ref endpoint) = self.config.agent_endpoint {
+            self.discovery.add_alias(endpoint.clone(), pubkey.clone()).await;
+            tracing::info!(
+                agent_endpoint = %endpoint,
+                "registered agent endpoint alias"
+            );
+        }
 
         // If running in sidecar mode, log the agent info.
         if let Some(ref agent_name) = self.config.agent_name {
@@ -624,8 +634,11 @@ impl Node {
         for addr in &bootstrap_nodes {
             tracing::info!(addr = %addr, "bootstrapping from peer");
             match Self::fetch_status_http(addr).await {
-                Ok((pubkey, latest_seq)) => {
-                    discovery.add_peer(pubkey, addr.clone(), latest_seq).await;
+                Ok((pubkey, latest_seq, agent_endpoint)) => {
+                    discovery.add_peer(pubkey.clone(), addr.clone(), latest_seq).await;
+                    if let Some(ep) = agent_endpoint {
+                        discovery.add_alias(ep, pubkey).await;
+                    }
                     tracing::info!(addr = %addr, "bootstrap peer added");
                 }
                 Err(e) => {
@@ -653,8 +666,11 @@ impl Node {
             for peer in gossip_peers {
                 // Refresh peer status.
                 match Self::fetch_status_http(&peer.address).await {
-                    Ok((pubkey, latest_seq)) => {
-                        discovery.add_peer(pubkey, peer.address.clone(), latest_seq).await;
+                    Ok((pubkey, latest_seq, agent_endpoint)) => {
+                        discovery.add_peer(pubkey.clone(), peer.address.clone(), latest_seq).await;
+                        if let Some(ep) = agent_endpoint {
+                            discovery.add_alias(ep, pubkey).await;
+                        }
                     }
                     Err(_) => {
                         // Stale peer — remove if not seen for 5 minutes.
@@ -700,7 +716,8 @@ impl Node {
     }
 
     /// Fetch status from a peer via HTTP.
-    async fn fetch_status_http(addr: &str) -> anyhow::Result<(String, u64)> {
+    /// Returns (pubkey, latest_seq, optional agent_endpoint).
+    async fn fetch_status_http(addr: &str) -> anyhow::Result<(String, u64, Option<String>)> {
         let url = if addr.starts_with("http") {
             format!("{addr}/status")
         } else {
@@ -722,8 +739,11 @@ impl Node {
         let latest_seq = resp.get("latest_seq")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let agent_endpoint = resp.get("agent_endpoint")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-        Ok((pubkey, latest_seq))
+        Ok((pubkey, latest_seq, agent_endpoint))
     }
 
     /// Fetch peer list from a peer via HTTP.

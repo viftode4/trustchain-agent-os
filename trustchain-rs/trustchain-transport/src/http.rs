@@ -25,6 +25,8 @@ pub struct AppState<S: BlockStore + 'static> {
     pub discovery: Arc<PeerDiscovery>,
     /// QUIC transport for P2P communication (optional — None in tests).
     pub quic: Option<Arc<QuicTransport>>,
+    /// The agent endpoint this sidecar proxies for (e.g. "http://localhost:9002").
+    pub agent_endpoint: Option<String>,
 }
 
 // Manual Clone impl — Arc handles the cloning, S doesn't need Clone.
@@ -34,6 +36,7 @@ impl<S: BlockStore + 'static> Clone for AppState<S> {
             protocol: self.protocol.clone(),
             discovery: self.discovery.clone(),
             quic: self.quic.clone(),
+            agent_endpoint: self.agent_endpoint.clone(),
         }
     }
 }
@@ -45,6 +48,8 @@ pub struct StatusResponse {
     pub latest_seq: u64,
     pub block_count: usize,
     pub peer_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_endpoint: Option<String>,
 }
 
 /// Request for proposal endpoint.
@@ -139,6 +144,15 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Response for trust score endpoint.
+#[derive(Serialize)]
+pub struct TrustScoreResponse {
+    pub pubkey: String,
+    pub trust_score: f64,
+    pub interaction_count: usize,
+    pub block_count: usize,
+}
+
 #[derive(Serialize)]
 pub struct PeerInfoResponse {
     pub pubkey: String,
@@ -157,6 +171,7 @@ pub fn build_router<S: BlockStore + Send + 'static>(state: AppState<S>) -> Route
         .route("/block/{pubkey}/{seq}", get(handle_get_block::<S>))
         .route("/crawl/{pubkey}", get(handle_crawl::<S>))
         .route("/peers", get(handle_get_peers::<S>))
+        .route("/trust/{pubkey}", get(handle_trust_score::<S>))
         .route("/discover", get(handle_discover::<S>))
         .with_state(state)
 }
@@ -195,6 +210,7 @@ async fn handle_status<S: BlockStore + 'static>(
         latest_seq,
         block_count,
         peer_count,
+        agent_endpoint: state.agent_endpoint.clone(),
     }))
 }
 
@@ -404,6 +420,36 @@ async fn handle_get_peers<S: BlockStore + 'static>(
     Json(response)
 }
 
+/// Query the trust score for a given public key.
+async fn handle_trust_score<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
+    Path(pubkey): Path<String>,
+) -> Result<Json<TrustScoreResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let proto = state.protocol.lock().await;
+    let store = proto.store();
+
+    let engine = TrustEngine::new(store, None, None);
+    let trust_score = engine.compute_trust(&pubkey).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    let chain = store.get_chain(&pubkey).unwrap_or_default();
+    let interaction_count = chain.len();
+    let block_count = store.get_block_count().unwrap_or(0);
+
+    Ok(Json(TrustScoreResponse {
+        pubkey,
+        trust_score,
+        interaction_count,
+        block_count,
+    }))
+}
+
 /// P2P capability discovery — find agents by proven interaction history.
 ///
 /// Fans out to trusted peers via QUIC, merges results, ranks by trust score.
@@ -541,6 +587,7 @@ mod tests {
             protocol: Arc::new(Mutex::new(protocol)),
             discovery: Arc::new(discovery),
             quic: None,
+            agent_endpoint: None,
         }
     }
 
@@ -606,6 +653,54 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_trust_endpoint() {
+        let state = make_test_state();
+        let app = build_router(state);
+
+        let bob = Identity::from_bytes(&[2u8; 32]);
+        let request = Request::builder()
+            .uri(&format!("/trust/{}", bob.pubkey_hex()))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let trust_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(trust_resp.get("trust_score").is_some());
+        assert!(trust_resp.get("interaction_count").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_status_includes_agent_endpoint() {
+        let identity = Identity::from_bytes(&[1u8; 32]);
+        let store = MemoryBlockStore::new();
+        let protocol = TrustChainProtocol::new(identity.clone(), store);
+        let discovery = PeerDiscovery::new(identity.pubkey_hex(), vec![]);
+
+        let state = AppState {
+            protocol: Arc::new(Mutex::new(protocol)),
+            discovery: Arc::new(discovery),
+            quic: None,
+            agent_endpoint: Some("http://localhost:9002".to_string()),
+        };
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["agent_endpoint"], "http://localhost:9002");
     }
 
     #[tokio::test]

@@ -25,6 +25,9 @@ pub struct PeerDiscovery {
     bootstrap_nodes: Vec<String>,
     /// Our own public key.
     our_pubkey: String,
+    /// Address aliases: maps normalized address (e.g. "127.0.0.1:9002") → pubkey.
+    /// Used by the proxy to resolve agent endpoints to TC peer identities.
+    aliases: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl PeerDiscovery {
@@ -33,6 +36,7 @@ impl PeerDiscovery {
             peers: Arc::new(RwLock::new(HashMap::new())),
             bootstrap_nodes,
             our_pubkey,
+            aliases: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -66,12 +70,41 @@ impl PeerDiscovery {
 
     /// Look up a peer by their HTTP address (e.g. "127.0.0.1:8202" or "http://127.0.0.1:8202").
     /// Used by the proxy to check whether an outbound call targets a known TC peer.
+    /// Falls back to alias lookup if no direct match is found.
     pub async fn get_peer_by_address(&self, address: &str) -> Option<PeerRecord> {
-        let needle = address.strip_prefix("http://").unwrap_or(address);
-        self.peers.read().await.values().find(|p| {
-            let peer_addr = p.address.strip_prefix("http://").unwrap_or(&p.address);
-            peer_addr == needle
-        }).cloned()
+        let normalized = normalize_address(address);
+
+        // Direct match against registered peer addresses.
+        {
+            let peers = self.peers.read().await;
+            for peer in peers.values() {
+                if normalize_address(&peer.address) == normalized {
+                    return Some(peer.clone());
+                }
+            }
+        }
+
+        // Fallback: check aliases.
+        let pubkey = {
+            let aliases = self.aliases.read().await;
+            aliases.get(&normalized).cloned()
+        };
+
+        if let Some(pk) = pubkey {
+            return self.get_peer(&pk).await;
+        }
+
+        None
+    }
+
+    /// Register an address alias mapping to a peer's public key.
+    ///
+    /// This lets the proxy resolve agent endpoints (e.g. `localhost:9002`)
+    /// to the correct TC peer identity, even though peers register with
+    /// their sidecar HTTP address (e.g. `127.0.0.1:8212`).
+    pub async fn add_alias(&self, alias_address: String, pubkey: String) {
+        let normalized = normalize_address(&alias_address);
+        self.aliases.write().await.insert(normalized, pubkey);
     }
 
     /// Get the number of known peers.
@@ -105,6 +138,16 @@ impl PeerDiscovery {
             self.add_peer(pubkey, address, seq).await;
         }
     }
+}
+
+/// Normalize an address for matching: strip scheme, lowercase, resolve localhost.
+fn normalize_address(addr: &str) -> String {
+    let s = addr
+        .trim()
+        .to_lowercase()
+        .replace("http://", "")
+        .replace("https://", "");
+    s.replace("localhost", "127.0.0.1")
 }
 
 #[cfg(test)]
@@ -162,5 +205,42 @@ mod tests {
         }
         let gossip = disc.get_gossip_peers(3).await;
         assert_eq!(gossip.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_peer_by_address_direct() {
+        let disc = PeerDiscovery::new("us".to_string(), vec![]);
+        disc.add_peer("peer1".to_string(), "http://127.0.0.1:8212".to_string(), 5).await;
+
+        let peer = disc.get_peer_by_address("http://127.0.0.1:8212").await.unwrap();
+        assert_eq!(peer.pubkey, "peer1");
+    }
+
+    #[tokio::test]
+    async fn test_get_peer_by_address_alias() {
+        let disc = PeerDiscovery::new("us".to_string(), vec![]);
+        disc.add_peer("peer1".to_string(), "http://127.0.0.1:8212".to_string(), 5).await;
+        disc.add_alias("http://localhost:9002".to_string(), "peer1".to_string()).await;
+
+        let peer = disc.get_peer_by_address("http://localhost:9002").await.unwrap();
+        assert_eq!(peer.pubkey, "peer1");
+        assert_eq!(peer.address, "http://127.0.0.1:8212");
+    }
+
+    #[tokio::test]
+    async fn test_get_peer_by_address_localhost_normalization() {
+        let disc = PeerDiscovery::new("us".to_string(), vec![]);
+        disc.add_peer("peer1".to_string(), "http://localhost:8212".to_string(), 5).await;
+
+        let peer = disc.get_peer_by_address("http://127.0.0.1:8212").await.unwrap();
+        assert_eq!(peer.pubkey, "peer1");
+    }
+
+    #[tokio::test]
+    async fn test_get_peer_by_address_miss() {
+        let disc = PeerDiscovery::new("us".to_string(), vec![]);
+        disc.add_peer("peer1".to_string(), "http://127.0.0.1:8212".to_string(), 5).await;
+
+        assert!(disc.get_peer_by_address("http://127.0.0.1:9999").await.is_none());
     }
 }
