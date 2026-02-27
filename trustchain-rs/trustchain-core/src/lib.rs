@@ -24,14 +24,14 @@ pub mod trust;
 pub mod types;
 
 // Re-export key types at crate root for convenience.
-pub use blockstore::{BlockStore, MemoryBlockStore, SqliteBlockStore};
+pub use blockstore::{BlockStore, DoubleSpend, MemoryBlockStore, SqliteBlockStore};
 pub use chain::PersonalChain;
 pub use consensus::{CHECOConsensus, Checkpoint};
 pub use crawler::{BlockStoreCrawler, CrossChainLink, DAGView, TamperingReport};
 pub use error::{Result, TrustChainError};
-pub use halfblock::{create_half_block, verify_block, HalfBlock};
+pub use halfblock::{create_half_block, validate_and_record, validate_block, validate_block_invariants, verify_block, HalfBlock};
 pub use identity::Identity;
 pub use netflow::NetFlowTrust;
 pub use protocol::TrustChainProtocol;
 pub use trust::{TrustEngine, TrustWeights};
-pub use types::{BlockType, GENESIS_HASH};
+pub use types::{BlockType, ValidationResult, GENESIS_HASH, GENESIS_SEQ, UNKNOWN_SEQ};

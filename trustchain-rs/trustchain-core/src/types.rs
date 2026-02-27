@@ -7,6 +7,52 @@ use std::fmt;
 pub const GENESIS_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// First valid sequence number.
+pub const GENESIS_SEQ: u64 = 1;
+
+/// Unknown/unlinked sequence number (used in proposals before the responder replies).
+pub const UNKNOWN_SEQ: u64 = 0;
+
+// ---------------------------------------------------------------------------
+// ValidationResult — tiered validation matching py-ipv8
+// ---------------------------------------------------------------------------
+
+/// Tiered validation result matching py-ipv8's ValidationResult.
+///
+/// Validation levels, from most to least confidence:
+/// - `Valid` — block and full chain context verified
+/// - `PartialNext` — valid but we don't know (or have gaps after) the next block
+/// - `PartialPrevious` — valid but we don't know the previous block
+/// - `Partial` — valid but we have gaps on both sides
+/// - `NoInfo` — we have no chain context for this public key at all
+/// - `Invalid` — the block violates at least one invariant
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ValidationResult {
+    Valid,
+    PartialNext,
+    PartialPrevious,
+    Partial,
+    NoInfo,
+    Invalid(Vec<String>),
+}
+
+impl ValidationResult {
+    pub fn is_valid(&self) -> bool {
+        !matches!(self, ValidationResult::Invalid(_))
+    }
+
+    pub fn is_fully_valid(&self) -> bool {
+        matches!(self, ValidationResult::Valid)
+    }
+
+    pub fn errors(&self) -> &[String] {
+        match self {
+            ValidationResult::Invalid(errs) => errs,
+            _ => &[],
+        }
+    }
+}
+
 /// Block types in the TrustChain protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -73,5 +119,35 @@ mod tests {
         assert_eq!(BlockType::from_str_loose("AGREEMENT"), Some(BlockType::Agreement));
         assert_eq!(BlockType::from_str_loose("checkpoint"), Some(BlockType::Checkpoint));
         assert_eq!(BlockType::from_str_loose("invalid"), None);
+    }
+
+    #[test]
+    fn test_validation_result_valid() {
+        let r = ValidationResult::Valid;
+        assert!(r.is_valid());
+        assert!(r.is_fully_valid());
+        assert!(r.errors().is_empty());
+    }
+
+    #[test]
+    fn test_validation_result_partial() {
+        let r = ValidationResult::Partial;
+        assert!(r.is_valid());
+        assert!(!r.is_fully_valid());
+    }
+
+    #[test]
+    fn test_validation_result_invalid() {
+        let r = ValidationResult::Invalid(vec!["bad sig".to_string()]);
+        assert!(!r.is_valid());
+        assert!(!r.is_fully_valid());
+        assert_eq!(r.errors().len(), 1);
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(GENESIS_SEQ, 1);
+        assert_eq!(UNKNOWN_SEQ, 0);
+        assert_eq!(GENESIS_HASH.len(), 64);
     }
 }

@@ -8,9 +8,10 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::blockstore::BlockStore;
 use crate::error::{Result, TrustChainError};
 use crate::identity::Identity;
-use crate::types::BlockType;
+use crate::types::{BlockType, GENESIS_HASH, GENESIS_SEQ, UNKNOWN_SEQ, ValidationResult};
 
 /// A half-block in the TrustChain protocol.
 ///
@@ -200,6 +201,214 @@ pub fn verify_block(block: &HalfBlock) -> Result<bool> {
         ));
     }
     block.verify_signature()
+}
+
+/// Validate block invariants (self-contained checks, no database needed).
+///
+/// Matches py-ipv8's `update_block_invariant`:
+/// 1. Sequence number must be >= GENESIS_SEQ (1)
+/// 2. Link sequence number must be UNKNOWN_SEQ (0) or >= GENESIS_SEQ
+/// 3. Timestamp must be non-negative
+/// 4. Public key must be 64 hex chars
+/// 5. Signature must be valid (hash + sig check)
+/// 6. No self-signed blocks (public_key != link_public_key)
+/// 7. Genesis consistency: seq==1 ↔ previous_hash==GENESIS_HASH
+pub fn validate_block_invariants(block: &HalfBlock) -> ValidationResult {
+    let mut errors = Vec::new();
+
+    // 1. Sequence number sanity.
+    if block.sequence_number < GENESIS_SEQ {
+        errors.push(format!(
+            "Sequence number {} is prior to genesis",
+            block.sequence_number
+        ));
+    }
+
+    // 2. Link sequence number: 0 (unknown) or >= 1.
+    if block.link_sequence_number != UNKNOWN_SEQ && block.link_sequence_number < GENESIS_SEQ {
+        errors.push(format!(
+            "Link sequence number {} not empty and is prior to genesis",
+            block.link_sequence_number
+        ));
+    }
+
+    // 3. Timestamp sanity.
+    if block.timestamp < 0.0 {
+        errors.push("Timestamp cannot be negative".to_string());
+    }
+
+    // 4. Public key format (64 hex chars = 32 bytes).
+    if block.public_key.len() != 64 || !block.public_key.chars().all(|c| c.is_ascii_hexdigit()) {
+        errors.push("Public key is not valid".to_string());
+    }
+
+    // 5. Signature verification.
+    if errors.iter().all(|e| e != "Public key is not valid") {
+        match verify_block(block) {
+            Ok(false) => errors.push("Invalid signature".to_string()),
+            Err(_) => errors.push("Invalid signature".to_string()),
+            Ok(true) => {}
+        }
+    }
+
+    // 6. Link public key validation (if not empty/unknown).
+    if !block.link_public_key.is_empty()
+        && block.link_public_key.len() != 64
+    {
+        errors.push("Linked public key is not valid".to_string());
+    }
+
+    // 7. No self-signed blocks.
+    if block.public_key == block.link_public_key && !block.is_checkpoint() {
+        errors.push("Self signed block".to_string());
+    }
+
+    // 8. Genesis consistency: seq==1 must have GENESIS_HASH, and vice versa.
+    if block.sequence_number == GENESIS_SEQ && block.previous_hash != GENESIS_HASH {
+        errors.push("Sequence number implies previous hash should be Genesis ID".to_string());
+    }
+    if block.sequence_number != GENESIS_SEQ && block.previous_hash == GENESIS_HASH {
+        errors.push(
+            "Sequence number implies previous hash should not be Genesis ID".to_string(),
+        );
+    }
+
+    if errors.is_empty() {
+        ValidationResult::Valid
+    } else {
+        ValidationResult::Invalid(errors)
+    }
+}
+
+/// Full block validation against a database, matching py-ipv8's `TrustChainBlock.validate()`.
+///
+/// Checks invariants, block consistency (double-sign), linked consistency (double-countersign),
+/// and chain consistency (previous/next hash links). Returns a tiered `ValidationResult`.
+///
+/// This is the read-only version — use `validate_and_record` to also persist fraud evidence.
+pub fn validate_block<S: BlockStore>(block: &HalfBlock, store: &S) -> ValidationResult {
+    // Step 1: Check invariants (self-contained).
+    let invariants = validate_block_invariants(block);
+    if let ValidationResult::Invalid(errors) = invariants {
+        return ValidationResult::Invalid(errors);
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // Step 2: Determine validation level based on available chain context.
+    let prev_blk = if block.sequence_number > GENESIS_SEQ {
+        store.get_block(&block.public_key, block.sequence_number - 1).ok().flatten()
+    } else {
+        None
+    };
+    let next_blk = store.get_block(&block.public_key, block.sequence_number + 1).ok().flatten();
+
+    let is_prev_gap = prev_blk.as_ref()
+        .map_or(true, |p| p.sequence_number != block.sequence_number - 1);
+    let is_next_gap = next_blk.as_ref()
+        .map_or(true, |n| n.sequence_number != block.sequence_number + 1);
+
+    let mut level = match (prev_blk.is_some() || block.sequence_number == GENESIS_SEQ, next_blk.is_some()) {
+        (false, false) => ValidationResult::NoInfo,
+        (false, true) if is_next_gap => ValidationResult::Partial,
+        (false, true) => ValidationResult::PartialPrevious,
+        (true, false) if is_prev_gap && block.sequence_number != GENESIS_SEQ => ValidationResult::Partial,
+        (true, false) => ValidationResult::PartialNext,
+        (true, true) => {
+            if is_prev_gap && is_next_gap {
+                ValidationResult::Partial
+            } else if is_prev_gap {
+                ValidationResult::PartialPrevious
+            } else if is_next_gap {
+                ValidationResult::PartialNext
+            } else {
+                ValidationResult::Valid
+            }
+        }
+    };
+
+    // Step 3: Block consistency — if we already have a block at this position, it must match.
+    if let Ok(Some(existing)) = store.get_block(&block.public_key, block.sequence_number) {
+        if existing.block_hash != block.block_hash {
+            // Two different blocks at the same position with valid signatures = double-sign fraud.
+            if verify_block(&existing).unwrap_or(false) {
+                errors.push("Double sign fraud".to_string());
+            } else {
+                errors.push("Block hash does not match known block".to_string());
+            }
+        }
+    }
+
+    // Step 4: Linked consistency — if the linked block exists, cross-check.
+    if block.link_sequence_number != UNKNOWN_SEQ {
+        if let Ok(Some(link)) = store.get_block(&block.link_public_key, block.link_sequence_number) {
+            // The link should point back to us.
+            if link.link_public_key != block.public_key && link.link_sequence_number != UNKNOWN_SEQ {
+                errors.push("Public key mismatch on linked block".to_string());
+            }
+            // Check for double-countersign: if link already has a different linked block.
+            if let Ok(Some(link_linked)) = store.get_linked_block(&link) {
+                if link_linked.block_hash != block.block_hash
+                    && link.link_sequence_number != UNKNOWN_SEQ
+                {
+                    errors.push("Double countersign fraud".to_string());
+                }
+            }
+        }
+    }
+
+    // Step 5: Chain consistency — previous and next hash links.
+    if let Some(ref prev) = prev_blk {
+        if prev.public_key != block.public_key {
+            errors.push("Previous block public key mismatch".to_string());
+        }
+        if !is_prev_gap && prev.block_hash != block.previous_hash {
+            errors.push("Previous hash is not equal to the hash id of the previous block".to_string());
+        }
+    }
+    if let Some(ref next) = next_blk {
+        if next.public_key != block.public_key {
+            errors.push("Next block public key mismatch".to_string());
+        }
+        if !is_next_gap && next.previous_hash != block.block_hash {
+            errors.push("Next hash is not equal to the hash id of the block".to_string());
+        }
+    }
+
+    if errors.is_empty() {
+        level
+    } else {
+        ValidationResult::Invalid(errors)
+    }
+}
+
+/// Validate a block and record any fraud evidence to the store.
+///
+/// Same as `validate_block` but also persists double-spend records.
+pub fn validate_and_record<S: BlockStore>(block: &HalfBlock, store: &mut S) -> ValidationResult {
+    // Run read-only validation first.
+    let result = validate_block(block, store);
+
+    // If double-sign fraud was detected, record it.
+    if let ValidationResult::Invalid(ref errors) = result {
+        if errors.iter().any(|e| e.contains("Double sign fraud")) {
+            if let Ok(Some(existing)) = store.get_block(&block.public_key, block.sequence_number) {
+                let _ = store.add_double_spend(&existing, block);
+            }
+        }
+        if errors.iter().any(|e| e.contains("Double countersign fraud")) {
+            // Record the double-countersign evidence.
+            if block.link_sequence_number != UNKNOWN_SEQ {
+                if let Ok(Some(link)) = store.get_block(&block.link_public_key, block.link_sequence_number) {
+                    if let Ok(Some(link_linked)) = store.get_linked_block(&link) {
+                        let _ = store.add_double_spend(&link_linked, block);
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -394,6 +603,168 @@ mod tests {
         );
         assert_eq!(block.previous_hash, GENESIS_HASH);
         assert!(verify_block(&block).unwrap());
+    }
+
+    #[test]
+    fn test_invariant_valid_block() {
+        let id = test_identity();
+        let block = create_half_block(
+            &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+        );
+        let result = validate_block_invariants(&block);
+        assert_eq!(result, ValidationResult::Valid);
+    }
+
+    #[test]
+    fn test_invariant_self_signed_rejected() {
+        let id = test_identity();
+        let block = create_half_block(
+            &id, 1, &id.pubkey_hex(), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+        );
+        let result = validate_block_invariants(&block);
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+        if let ValidationResult::Invalid(errors) = &result {
+            assert!(errors.iter().any(|e| e.contains("Self signed")));
+        }
+    }
+
+    #[test]
+    fn test_invariant_genesis_hash_consistency() {
+        let id = test_identity();
+        // seq=1 but previous_hash is NOT genesis → invalid
+        let mut block = create_half_block(
+            &id, 1, &"b".repeat(64), 0, &"a".repeat(64),
+            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+        );
+        // Re-sign with the wrong previous hash
+        block.block_hash = block.compute_hash();
+        block.signature = id.sign_hex(block.block_hash.as_bytes());
+        let result = validate_block_invariants(&block);
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+    }
+
+    #[test]
+    fn test_invariant_seq2_with_genesis_hash() {
+        let id = test_identity();
+        // seq=2 but previous_hash is GENESIS → invalid
+        let mut block = create_half_block(
+            &id, 2, &"b".repeat(64), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+        );
+        block.block_hash = block.compute_hash();
+        block.signature = id.sign_hex(block.block_hash.as_bytes());
+        let result = validate_block_invariants(&block);
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+        if let ValidationResult::Invalid(errors) = &result {
+            assert!(errors.iter().any(|e| e.contains("should not be Genesis")));
+        }
+    }
+
+    #[test]
+    fn test_invariant_negative_timestamp() {
+        let id = test_identity();
+        let block = create_half_block(
+            &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({}), Some(-1.0),
+        );
+        let result = validate_block_invariants(&block);
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+    }
+
+    #[test]
+    fn test_invariant_checkpoint_self_ref_allowed() {
+        // Checkpoint blocks reference self — should NOT trigger "self signed" error.
+        let id = test_identity();
+        let block = create_half_block(
+            &id, 1, &id.pubkey_hex(), 0, GENESIS_HASH,
+            BlockType::Checkpoint, serde_json::json!({"checkpoint": true}), Some(1000.0),
+        );
+        let result = validate_block_invariants(&block);
+        // Should NOT have self-sign error (checkpoints are self-referencing).
+        if let ValidationResult::Invalid(errors) = &result {
+            assert!(!errors.iter().any(|e| e.contains("Self signed")), "checkpoint self-ref should be allowed");
+        }
+    }
+
+    #[test]
+    fn test_validate_block_no_info() {
+        // Genesis block in empty store → PartialNext (genesis acts as "prev exists").
+        let id = test_identity();
+        let store = crate::blockstore::MemoryBlockStore::new();
+        let block = create_half_block(
+            &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+        );
+        let result = validate_block(&block, &store);
+        assert_eq!(result, ValidationResult::PartialNext);
+    }
+
+    #[test]
+    fn test_validate_block_with_prev() {
+        let id = test_identity();
+        let mut store = crate::blockstore::MemoryBlockStore::new();
+        let b1 = create_half_block(
+            &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+        );
+        store.add_block(&b1).unwrap();
+
+        let b2 = create_half_block(
+            &id, 2, &"b".repeat(64), 0, &b1.block_hash,
+            BlockType::Proposal, serde_json::json!({}), Some(1001.0),
+        );
+        let result = validate_block(&b2, &store);
+        // Has prev (b1), no next → PartialNext.
+        assert_eq!(result, ValidationResult::PartialNext);
+    }
+
+    #[test]
+    fn test_validate_block_double_sign_fraud() {
+        let id = test_identity();
+        let mut store = crate::blockstore::MemoryBlockStore::new();
+        let b1 = create_half_block(
+            &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({"tx": "original"}), Some(1000.0),
+        );
+        store.add_block(&b1).unwrap();
+
+        // Different block at same seq = double-sign fraud.
+        let b1_fraud = create_half_block(
+            &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({"tx": "fraud"}), Some(1000.0),
+        );
+        let result = validate_block(&b1_fraud, &store);
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+        if let ValidationResult::Invalid(errors) = &result {
+            assert!(errors.iter().any(|e| e.contains("Double sign fraud")));
+        }
+    }
+
+    #[test]
+    fn test_validate_and_record_stores_fraud() {
+        let id = test_identity();
+        let mut store = crate::blockstore::MemoryBlockStore::new();
+        let b1 = create_half_block(
+            &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({"tx": "original"}), Some(1000.0),
+        );
+        store.add_block(&b1).unwrap();
+
+        // Double-sign fraud.
+        let b1_fraud = create_half_block(
+            &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
+            BlockType::Proposal, serde_json::json!({"tx": "fraud"}), Some(1000.0),
+        );
+        let result = validate_and_record(&b1_fraud, &mut store);
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+
+        // Fraud should be recorded.
+        let frauds = store.get_double_spends(&id.pubkey_hex()).unwrap();
+        assert_eq!(frauds.len(), 1);
+        assert_eq!(frauds[0].block_a.block_hash, b1.block_hash);
+        assert_eq!(frauds[0].block_b.block_hash, b1_fraud.block_hash);
     }
 
     #[test]

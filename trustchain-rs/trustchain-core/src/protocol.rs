@@ -5,9 +5,11 @@
 
 use crate::blockstore::BlockStore;
 use crate::error::{Result, TrustChainError};
-use crate::halfblock::{create_half_block, verify_block, HalfBlock};
+use crate::halfblock::{
+    create_half_block, validate_and_record, verify_block, HalfBlock,
+};
 use crate::identity::Identity;
-use crate::types::{BlockType, GENESIS_HASH};
+use crate::types::{BlockType, ValidationResult, GENESIS_HASH};
 
 /// The TrustChain protocol engine. Manages proposal/agreement lifecycle for one agent.
 pub struct TrustChainProtocol<S: BlockStore> {
@@ -99,53 +101,21 @@ impl<S: BlockStore> TrustChainProtocol<S> {
             ));
         }
 
-        // Verify signature.
-        if !verify_block(proposal)? {
-            return Err(TrustChainError::signature(
-                &proposal.public_key,
-                proposal.sequence_number,
-                "invalid signature on proposal",
-            ));
+        // Full tiered validation (invariants + chain context + fraud detection).
+        let validation = validate_and_record(proposal, &mut self.store);
+        match &validation {
+            ValidationResult::Invalid(errors) => {
+                return Err(TrustChainError::proposal(
+                    &proposal.public_key,
+                    proposal.sequence_number,
+                    format!("validation failed: {}", errors.join("; ")),
+                ));
+            }
+            // Valid, Partial*, NoInfo — all acceptable for receiving a proposal.
+            _ => {}
         }
 
-        // Check sequence continuity if we know this peer.
-        let known_latest = self.store.get_latest_seq(&proposal.public_key)?;
-        if known_latest > 0 {
-            // If we already have this exact sequence, check if it's the same block (idempotent).
-            if proposal.sequence_number <= known_latest {
-                if let Ok(Some(existing)) = self.store.get_block(&proposal.public_key, proposal.sequence_number) {
-                    if existing.block_hash == proposal.block_hash {
-                        return Ok(true); // Already stored, idempotent.
-                    }
-                }
-                // Different block at same or earlier seq — reject.
-                return Err(TrustChainError::sequence_gap(
-                    &proposal.public_key,
-                    known_latest + 1,
-                    proposal.sequence_number,
-                ));
-            }
-
-            let expected_seq = known_latest + 1;
-            if proposal.sequence_number != expected_seq {
-                return Err(TrustChainError::sequence_gap(
-                    &proposal.public_key,
-                    expected_seq,
-                    proposal.sequence_number,
-                ));
-            }
-            let expected_prev = self.store.get_head_hash(&proposal.public_key)?;
-            if proposal.previous_hash != expected_prev {
-                return Err(TrustChainError::prev_hash_mismatch(
-                    &proposal.public_key,
-                    proposal.sequence_number,
-                    &expected_prev,
-                    &proposal.previous_hash,
-                ));
-            }
-        }
-
-        // Store the proposal in our store (idempotent — ignore duplicates).
+        // Store the proposal (idempotent — ignore duplicates).
         match self.store.add_block(proposal) {
             Ok(()) => {}
             Err(TrustChainError::DuplicateSequence { .. }) => {} // Already stored.
@@ -239,27 +209,29 @@ impl<S: BlockStore> TrustChainProtocol<S> {
             ));
         }
 
-        // Verify signature.
-        if !verify_block(agreement)? {
-            return Err(TrustChainError::signature(
-                &agreement.public_key,
-                agreement.sequence_number,
-                "invalid signature on agreement",
-            ));
+        // Full tiered validation (invariants + chain context + fraud detection).
+        let validation = validate_and_record(agreement, &mut self.store);
+        match &validation {
+            ValidationResult::Invalid(errors) => {
+                return Err(TrustChainError::agreement(
+                    &agreement.public_key,
+                    agreement.sequence_number,
+                    format!("validation failed: {}", errors.join("; ")),
+                ));
+            }
+            _ => {}
         }
 
         // The linked proposal must exist in our store.
+        let our_seq = agreement.link_sequence_number;
         let proposal = self
             .store
-            .get_block(&self.pubkey(), agreement.link_sequence_number)?
+            .get_block(&self.pubkey(), our_seq)?
             .ok_or_else(|| {
                 TrustChainError::agreement(
                     &agreement.public_key,
                     agreement.sequence_number,
-                    format!(
-                        "linked proposal not found: seq {}",
-                        agreement.link_sequence_number
-                    ),
+                    format!("no matching proposal at our seq {}", our_seq),
                 )
             })?;
 
@@ -268,10 +240,7 @@ impl<S: BlockStore> TrustChainProtocol<S> {
             return Err(TrustChainError::agreement(
                 &agreement.public_key,
                 agreement.sequence_number,
-                format!(
-                    "linked block is not a proposal: {}",
-                    proposal.block_type
-                ),
+                format!("linked block is not a proposal: {}", proposal.block_type),
             ));
         }
 
@@ -287,7 +256,7 @@ impl<S: BlockStore> TrustChainProtocol<S> {
         // Store the agreement (idempotent — ignore duplicates).
         match self.store.add_block(agreement) {
             Ok(()) => {}
-            Err(TrustChainError::DuplicateSequence { .. }) => {} // Already stored.
+            Err(TrustChainError::DuplicateSequence { .. }) => {}
             Err(e) => return Err(e),
         }
         Ok(true)

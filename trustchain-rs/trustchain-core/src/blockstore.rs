@@ -14,6 +14,13 @@ use crate::error::{Result, TrustChainError};
 use crate::halfblock::HalfBlock;
 use crate::types::GENESIS_HASH;
 
+/// A pair of conflicting blocks at the same `(public_key, sequence_number)`.
+#[derive(Debug, Clone)]
+pub struct DoubleSpend {
+    pub block_a: HalfBlock,
+    pub block_b: HalfBlock,
+}
+
 /// Trait for block storage backends.
 pub trait BlockStore: Send {
     /// Store a block. Returns error on duplicate `(public_key, sequence_number)`.
@@ -44,6 +51,12 @@ pub trait BlockStore: Send {
 
     /// Get total number of blocks stored.
     fn get_block_count(&self) -> Result<usize>;
+
+    /// Record a double-spend: two different blocks at the same (pubkey, seq).
+    fn add_double_spend(&mut self, block_a: &HalfBlock, block_b: &HalfBlock) -> Result<()>;
+
+    /// Get all recorded double-spends for a public key.
+    fn get_double_spends(&self, pubkey: &str) -> Result<Vec<DoubleSpend>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +67,7 @@ pub trait BlockStore: Send {
 #[derive(Debug, Default)]
 pub struct MemoryBlockStore {
     blocks: HashMap<(String, u64), HalfBlock>,
+    double_spends: Vec<DoubleSpend>,
 }
 
 impl MemoryBlockStore {
@@ -148,6 +162,23 @@ impl BlockStore for MemoryBlockStore {
     fn get_block_count(&self) -> Result<usize> {
         Ok(self.blocks.len())
     }
+
+    fn add_double_spend(&mut self, block_a: &HalfBlock, block_b: &HalfBlock) -> Result<()> {
+        self.double_spends.push(DoubleSpend {
+            block_a: block_a.clone(),
+            block_b: block_b.clone(),
+        });
+        Ok(())
+    }
+
+    fn get_double_spends(&self, pubkey: &str) -> Result<Vec<DoubleSpend>> {
+        Ok(self
+            .double_spends
+            .iter()
+            .filter(|ds| ds.block_a.public_key == pubkey || ds.block_b.public_key == pubkey)
+            .cloned()
+            .collect())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +232,18 @@ impl SqliteBlockStore {
             );
             CREATE INDEX IF NOT EXISTS idx_link ON blocks(link_public_key, link_sequence_number);
             CREATE INDEX IF NOT EXISTS idx_hash ON blocks(block_hash);
-            CREATE INDEX IF NOT EXISTS idx_block_type ON blocks(block_type);",
+            CREATE INDEX IF NOT EXISTS idx_block_type ON blocks(block_type);
+
+            CREATE TABLE IF NOT EXISTS double_spends (
+                public_key TEXT NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                block_hash_a TEXT NOT NULL,
+                block_hash_b TEXT NOT NULL,
+                block_data_a TEXT NOT NULL,
+                block_data_b TEXT NOT NULL,
+                detected_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ds_pubkey ON double_spends(public_key);",
         )?;
         Ok(())
     }
@@ -385,6 +427,47 @@ impl BlockStore for SqliteBlockStore {
             .query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))
             .map_err(|e| TrustChainError::Storage(e.to_string()))?;
         Ok(count as usize)
+    }
+
+    fn add_double_spend(&mut self, block_a: &HalfBlock, block_b: &HalfBlock) -> Result<()> {
+        let data_a = serde_json::to_string(block_a)?;
+        let data_b = serde_json::to_string(block_b)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO double_spends (public_key, sequence_number, block_hash_a, block_hash_b,
+             block_data_a, block_data_b, detected_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                block_a.public_key,
+                block_a.sequence_number,
+                block_a.block_hash,
+                block_b.block_hash,
+                data_a,
+                data_b,
+                Self::insert_time(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_double_spends(&self, pubkey: &str) -> Result<Vec<DoubleSpend>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT block_data_a, block_data_b FROM double_spends WHERE public_key = ?1",
+        )?;
+        let rows = stmt.query_map(params![pubkey], |row| {
+            let a: String = row.get(0)?;
+            let b: String = row.get(1)?;
+            Ok((a, b))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (a_json, b_json) = row.map_err(|e| TrustChainError::Storage(e.to_string()))?;
+            let block_a: HalfBlock = serde_json::from_str(&a_json)?;
+            let block_b: HalfBlock = serde_json::from_str(&b_json)?;
+            result.push(DoubleSpend { block_a, block_b });
+        }
+        Ok(result)
     }
 }
 
