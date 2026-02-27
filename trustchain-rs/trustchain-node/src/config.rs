@@ -18,6 +18,11 @@ pub struct NodeConfig {
     #[serde(default = "default_http_addr")]
     pub http_addr: String,
 
+    /// Listen address for the transparent HTTP proxy (agent sidecar).
+    /// Agents set HTTP_PROXY=http://<this address> to get automatic trust recording.
+    #[serde(default = "default_proxy_addr")]
+    pub proxy_addr: String,
+
     /// Path to the Ed25519 identity key file.
     #[serde(default = "default_key_path")]
     pub key_path: PathBuf,
@@ -45,6 +50,7 @@ impl Default for NodeConfig {
             quic_addr: default_quic_addr(),
             grpc_addr: default_grpc_addr(),
             http_addr: default_http_addr(),
+            proxy_addr: default_proxy_addr(),
             key_path: default_key_path(),
             db_path: default_db_path(),
             bootstrap_nodes: vec![],
@@ -78,6 +84,10 @@ fn default_grpc_addr() -> String {
 
 fn default_http_addr() -> String {
     "0.0.0.0:8202".to_string()
+}
+
+fn default_proxy_addr() -> String {
+    "127.0.0.1:8203".to_string()
 }
 
 fn default_key_path() -> PathBuf {

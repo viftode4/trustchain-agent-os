@@ -1,5 +1,6 @@
 //! Node — wires together protocol, storage, and all transports.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,14 +9,59 @@ use tokio::sync::{mpsc, Mutex};
 
 use trustchain_core::{
     BlockStore, HalfBlock, Identity, SqliteBlockStore, TrustChainProtocol,
+    validate_block_invariants, ValidationResult,
 };
 use trustchain_transport::{
-    AppState, ConnectionPool, PeerDiscovery, QuicTransport,
-    start_grpc_server, start_http_server,
-    message::{MessageType, TransportMessage, block_to_bytes, bytes_to_block},
+    AppState, ConnectionPool, PeerDiscovery, ProxyState, QuicTransport,
+    start_grpc_server, start_http_server, start_proxy_server,
+    message::{
+        BlockPairBroadcastPayload, MessageType, TransportMessage,
+        block_to_bytes, bytes_to_block,
+    },
 };
 
 use crate::config::NodeConfig;
+
+/// Default broadcast fanout (number of peers to gossip to).
+const BROADCAST_FANOUT: usize = 10;
+/// Default TTL for broadcast messages.
+const BROADCAST_TTL: u8 = 3;
+/// Max number of relayed block IDs to track (ring buffer).
+const BROADCAST_HISTORY_SIZE: usize = 10_000;
+
+/// Tracks which block IDs we've already relayed, preventing infinite loops.
+#[derive(Debug)]
+pub struct BroadcastTracker {
+    /// Set of block IDs we've seen (block_hash values).
+    seen: std::collections::HashSet<String>,
+    /// Order of insertion for eviction (ring buffer).
+    order: VecDeque<String>,
+}
+
+impl BroadcastTracker {
+    pub fn new() -> Self {
+        Self {
+            seen: std::collections::HashSet::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    /// Returns true if this block ID was NOT seen before (and marks it as seen).
+    pub fn mark_if_new(&mut self, block_id: &str) -> bool {
+        if self.seen.contains(block_id) {
+            return false;
+        }
+        self.seen.insert(block_id.to_string());
+        self.order.push_back(block_id.to_string());
+        // Evict old entries.
+        while self.seen.len() > BROADCAST_HISTORY_SIZE {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        true
+    }
+}
 
 /// A running TrustChain node.
 pub struct Node {
@@ -24,6 +70,7 @@ pub struct Node {
     pub protocol: Arc<Mutex<TrustChainProtocol<SqliteBlockStore>>>,
     pub discovery: Arc<PeerDiscovery>,
     pub pool: Arc<ConnectionPool>,
+    pub broadcast_tracker: Arc<Mutex<BroadcastTracker>>,
 }
 
 impl Node {
@@ -45,6 +92,7 @@ impl Node {
             protocol: Arc::new(Mutex::new(protocol)),
             discovery: Arc::new(discovery),
             pool: Arc::new(pool),
+            broadcast_tracker: Arc::new(Mutex::new(BroadcastTracker::new())),
         }
     }
 
@@ -77,7 +125,11 @@ impl Node {
             // Spawn the message router for QUIC.
             let protocol = self.protocol.clone();
             let discovery = self.discovery.clone();
-            tokio::spawn(Self::quic_message_router(quic_rx, protocol, discovery));
+            let tracker = self.broadcast_tracker.clone();
+            let quic_for_router = quic.clone();
+            tokio::spawn(Self::quic_message_router(
+                quic_rx, protocol, discovery, tracker, quic_for_router,
+            ));
             (handle, quic)
         };
         tracing::info!("QUIC message router started");
@@ -107,6 +159,21 @@ impl Node {
         });
         tracing::info!(%http_addr, "HTTP API ready");
 
+        // Start transparent HTTP proxy (agent sidecar).
+        let proxy_addr: SocketAddr = self.config.proxy_addr.parse()?;
+        let proxy_state = ProxyState {
+            protocol: self.protocol.clone(),
+            discovery: self.discovery.clone(),
+            quic: quic_accept_handle.1.clone(),
+            client: reqwest::Client::new(),
+        };
+        let proxy_handle = tokio::spawn(async move {
+            if let Err(e) = start_proxy_server(proxy_addr, proxy_state).await {
+                tracing::error!("proxy server error: {e}");
+            }
+        });
+        tracing::info!(%proxy_addr, "trust proxy ready — set HTTP_PROXY=http://{proxy_addr}");
+
         // Start peer discovery bootstrap + gossip.
         let disc = self.discovery.clone();
         let disc_protocol = self.protocol.clone();
@@ -130,6 +197,7 @@ impl Node {
             quic = %quic_local,
             grpc = %grpc_addr,
             http = %http_addr,
+            proxy = %proxy_addr,
             "node fully started"
         );
 
@@ -137,6 +205,7 @@ impl Node {
         tokio::select! {
             _ = grpc_handle => tracing::warn!("gRPC server exited"),
             _ = http_handle => tracing::warn!("HTTP server exited"),
+            _ = proxy_handle => tracing::warn!("proxy server exited"),
             _ = quic_accept_handle.0 => tracing::warn!("QUIC accept loop exited"),
             _ = discovery_handle => tracing::warn!("discovery loop exited"),
         }
@@ -150,12 +219,18 @@ impl Node {
         mut rx: mpsc::Receiver<(Vec<u8>, mpsc::Sender<Vec<u8>>)>,
         protocol: Arc<Mutex<TrustChainProtocol<SqliteBlockStore>>>,
         discovery: Arc<PeerDiscovery>,
+        tracker: Arc<Mutex<BroadcastTracker>>,
+        quic: Arc<QuicTransport>,
     ) {
         while let Some((data, resp_tx)) = rx.recv().await {
             let protocol = protocol.clone();
             let discovery = discovery.clone();
+            let tracker = tracker.clone();
+            let quic = quic.clone();
             tokio::spawn(async move {
-                let response = Self::handle_quic_message(&data, &protocol, &discovery).await;
+                let response = Self::handle_quic_message(
+                    &data, &protocol, &discovery, &tracker, &quic,
+                ).await;
                 let _ = resp_tx.send(response).await;
             });
         }
@@ -166,6 +241,8 @@ impl Node {
         data: &[u8],
         protocol: &Arc<Mutex<TrustChainProtocol<SqliteBlockStore>>>,
         discovery: &Arc<PeerDiscovery>,
+        tracker: &Arc<Mutex<BroadcastTracker>>,
+        quic: &Arc<QuicTransport>,
     ) -> Vec<u8> {
         // Try to deserialize as TransportMessage.
         let msg: TransportMessage = match serde_json::from_slice(data) {
@@ -299,10 +376,180 @@ impl Node {
                 serde_json::to_vec(&resp).unwrap_or_default()
             }
 
+            MessageType::BlockPairBroadcast => {
+                // Deserialize the broadcast payload.
+                let payload: BlockPairBroadcastPayload = match serde_json::from_slice(&msg.payload) {
+                    Ok(p) => p,
+                    Err(e) => return Self::error_response(&format!("invalid broadcast: {e}")),
+                };
+
+                // Check if we've already seen these blocks.
+                let block_id = format!("{}:{}", payload.block1.block_hash, payload.block2.block_hash);
+                {
+                    let mut t = tracker.lock().await;
+                    if !t.mark_if_new(&block_id) {
+                        // Already seen — don't process or relay.
+                        return serde_json::to_vec(&serde_json::json!({"status": "already_seen"}))
+                            .unwrap_or_default();
+                    }
+                }
+
+                // Validate both blocks.
+                let inv1 = validate_block_invariants(&payload.block1);
+                let inv2 = validate_block_invariants(&payload.block2);
+                if let ValidationResult::Invalid(e) = inv1 {
+                    tracing::warn!("broadcast block1 invalid: {:?}", e);
+                    return Self::error_response("broadcast block1 invalid");
+                }
+                if let ValidationResult::Invalid(e) = inv2 {
+                    tracing::warn!("broadcast block2 invalid: {:?}", e);
+                    return Self::error_response("broadcast block2 invalid");
+                }
+
+                // Persist both blocks (idempotent).
+                {
+                    let mut proto = protocol.lock().await;
+                    let _ = proto.store_mut().add_block(&payload.block1);
+                    let _ = proto.store_mut().add_block(&payload.block2);
+                }
+
+                tracing::debug!(
+                    "received broadcast: {}:{} seq {}+{}, ttl={}",
+                    &payload.block1.public_key[..8],
+                    &payload.block2.public_key[..8],
+                    payload.block1.sequence_number,
+                    payload.block2.sequence_number,
+                    payload.ttl,
+                );
+
+                // Relay if TTL > 1.
+                if payload.ttl > 1 {
+                    let relay_payload = BlockPairBroadcastPayload {
+                        block1: payload.block1,
+                        block2: payload.block2,
+                        ttl: payload.ttl - 1,
+                    };
+                    let our_pubkey = {
+                        let proto = protocol.lock().await;
+                        proto.pubkey()
+                    };
+                    Self::broadcast_to_peers(
+                        &relay_payload, &our_pubkey, discovery, quic, tracker,
+                    ).await;
+                }
+
+                serde_json::to_vec(&serde_json::json!({"status": "ok"}))
+                    .unwrap_or_default()
+            }
+
+            MessageType::HalfBlockBroadcast => {
+                // Single half-block broadcast — validate and persist.
+                let payload: trustchain_transport::message::HalfBlockBroadcastPayload =
+                    match serde_json::from_slice(&msg.payload) {
+                        Ok(p) => p,
+                        Err(e) => return Self::error_response(&format!("invalid broadcast: {e}")),
+                    };
+
+                let block_id = payload.block.block_hash.clone();
+                {
+                    let mut t = tracker.lock().await;
+                    if !t.mark_if_new(&block_id) {
+                        return serde_json::to_vec(&serde_json::json!({"status": "already_seen"}))
+                            .unwrap_or_default();
+                    }
+                }
+
+                let inv = validate_block_invariants(&payload.block);
+                if let ValidationResult::Invalid(e) = inv {
+                    tracing::warn!("broadcast block invalid: {:?}", e);
+                    return Self::error_response("broadcast block invalid");
+                }
+
+                {
+                    let mut proto = protocol.lock().await;
+                    let _ = proto.store_mut().add_block(&payload.block);
+                }
+
+                serde_json::to_vec(&serde_json::json!({"status": "ok"}))
+                    .unwrap_or_default()
+            }
+
             _ => {
                 Self::error_response("unhandled message type")
             }
         }
+    }
+
+    /// Broadcast a block pair to random peers via QUIC.
+    async fn broadcast_to_peers(
+        payload: &BlockPairBroadcastPayload,
+        our_pubkey: &str,
+        discovery: &Arc<PeerDiscovery>,
+        quic: &Arc<QuicTransport>,
+        tracker: &Arc<Mutex<BroadcastTracker>>,
+    ) {
+        let peers = discovery.get_gossip_peers(BROADCAST_FANOUT).await;
+        if peers.is_empty() {
+            return;
+        }
+
+        let msg = TransportMessage::new(
+            MessageType::BlockPairBroadcast,
+            our_pubkey.to_string(),
+            serde_json::to_vec(payload).unwrap_or_default(),
+            format!("bc-{}", payload.block1.block_hash.get(..8).unwrap_or("?")),
+        );
+        let msg_bytes = serde_json::to_vec(&msg).unwrap_or_default();
+
+        for peer in peers {
+            // Derive QUIC address from HTTP address (port - 2).
+            let quic_addr = match peer.address
+                .strip_prefix("http://")
+                .unwrap_or(&peer.address)
+                .parse::<SocketAddr>()
+            {
+                Ok(a) => SocketAddr::new(a.ip(), a.port().saturating_sub(2)),
+                Err(_) => continue,
+            };
+
+            let quic = quic.clone();
+            let msg_bytes = msg_bytes.clone();
+            tokio::spawn(async move {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    quic.send_message(quic_addr, &msg_bytes),
+                ).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::debug!("broadcast send error: {e}"),
+                    Err(_) => tracing::debug!("broadcast send timeout"),
+                }
+            });
+        }
+    }
+
+    /// Broadcast a completed transaction (both halves) to the network.
+    pub async fn broadcast_block_pair(
+        proposal: &HalfBlock,
+        agreement: &HalfBlock,
+        our_pubkey: &str,
+        discovery: &Arc<PeerDiscovery>,
+        quic: &Arc<QuicTransport>,
+        tracker: &Arc<Mutex<BroadcastTracker>>,
+    ) {
+        let payload = BlockPairBroadcastPayload {
+            block1: proposal.clone(),
+            block2: agreement.clone(),
+            ttl: BROADCAST_TTL,
+        };
+
+        // Mark as seen so we don't relay our own broadcast back.
+        {
+            let block_id = format!("{}:{}", proposal.block_hash, agreement.block_hash);
+            let mut t = tracker.lock().await;
+            t.mark_if_new(&block_id);
+        }
+
+        Self::broadcast_to_peers(&payload, our_pubkey, discovery, quic, tracker).await;
     }
 
     fn error_response(msg: &str) -> Vec<u8> {

@@ -272,7 +272,7 @@ fn peer_quic_addr(http_addr: &str) -> Result<std::net::SocketAddr, String> {
 }
 
 /// Generate a simple request ID.
-fn uuid_v4() -> String {
+pub(crate) fn uuid_v4() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     format!("{:016x}{:016x}", rng.gen::<u64>(), rng.gen::<u64>())

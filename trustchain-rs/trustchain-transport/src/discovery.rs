@@ -64,6 +64,16 @@ impl PeerDiscovery {
         self.peers.read().await.get(pubkey).cloned()
     }
 
+    /// Look up a peer by their HTTP address (e.g. "127.0.0.1:8202" or "http://127.0.0.1:8202").
+    /// Used by the proxy to check whether an outbound call targets a known TC peer.
+    pub async fn get_peer_by_address(&self, address: &str) -> Option<PeerRecord> {
+        let needle = address.strip_prefix("http://").unwrap_or(address);
+        self.peers.read().await.values().find(|p| {
+            let peer_addr = p.address.strip_prefix("http://").unwrap_or(&p.address);
+            peer_addr == needle
+        }).cloned()
+    }
+
     /// Get the number of known peers.
     pub async fn peer_count(&self) -> usize {
         self.peers.read().await.len()
