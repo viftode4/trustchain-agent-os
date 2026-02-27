@@ -7,6 +7,7 @@
 //! - **Discovery**: Peer finding via bootstrap + gossip
 //! - **Pool**: Connection pooling for efficient reuse
 
+pub mod discover;
 pub mod discovery;
 pub mod grpc;
 pub mod http;

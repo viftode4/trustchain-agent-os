@@ -16,6 +16,14 @@ pub enum MessageType {
     DiscoveryResponse,
     Ping,
     Pong,
+    /// A single half-block broadcast with TTL.
+    HalfBlockBroadcast,
+    /// A block pair broadcast (both halves of a completed transaction) with TTL.
+    BlockPairBroadcast,
+    /// P2P capability discovery: "which agents have you seen doing X?"
+    CapabilityRequest,
+    /// Response with discovered agents.
+    CapabilityResponse,
 }
 
 impl std::fmt::Display for MessageType {
@@ -31,6 +39,10 @@ impl std::fmt::Display for MessageType {
             MessageType::DiscoveryResponse => write!(f, "discovery_response"),
             MessageType::Ping => write!(f, "ping"),
             MessageType::Pong => write!(f, "pong"),
+            MessageType::HalfBlockBroadcast => write!(f, "half_block_broadcast"),
+            MessageType::BlockPairBroadcast => write!(f, "block_pair_broadcast"),
+            MessageType::CapabilityRequest => write!(f, "capability_request"),
+            MessageType::CapabilityResponse => write!(f, "capability_response"),
         }
     }
 }
@@ -76,4 +88,19 @@ pub fn blocks_to_bytes(blocks: &[HalfBlock]) -> Vec<u8> {
 
 pub fn bytes_to_blocks(bytes: &[u8]) -> Result<Vec<HalfBlock>, serde_json::Error> {
     serde_json::from_slice(bytes)
+}
+
+/// Payload for a block pair broadcast: both halves of a completed transaction + TTL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockPairBroadcastPayload {
+    pub block1: HalfBlock,
+    pub block2: HalfBlock,
+    pub ttl: u8,
+}
+
+/// Payload for a single half-block broadcast + TTL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HalfBlockBroadcastPayload {
+    pub block: HalfBlock,
+    pub ttl: u8,
 }

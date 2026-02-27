@@ -12,8 +12,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use trustchain_core::{BlockStore, HalfBlock, TrustChainProtocol};
+use trustchain_core::{BlockStore, HalfBlock, TrustChainProtocol, TrustEngine};
 
+use crate::discover::{self, CapabilityQuery, DiscoveredAgent};
 use crate::discovery::PeerDiscovery;
 use crate::message::{MessageType, TransportMessage, block_to_bytes, bytes_to_block};
 use crate::quic::QuicTransport;
@@ -99,6 +100,27 @@ pub struct CrawlQuery {
     pub start_seq: Option<u64>,
 }
 
+/// Query parameters for capability discovery endpoint.
+#[derive(Deserialize)]
+pub struct DiscoverParams {
+    /// The capability to search for (e.g. "compute", "storage").
+    pub capability: String,
+    /// Minimum trust score for returned agents (0.0 - 1.0).
+    pub min_trust: Option<f64>,
+    /// Maximum results to return.
+    pub max_results: Option<usize>,
+    /// Number of peers to fan out the query to.
+    pub fan_out: Option<usize>,
+}
+
+/// Response for capability discovery.
+#[derive(Serialize)]
+pub struct DiscoverResponse {
+    pub agents: Vec<DiscoveredAgent>,
+    /// How many peers were queried in the fan-out.
+    pub queried_peers: usize,
+}
+
 /// Response for block retrieval.
 #[derive(Serialize)]
 pub struct BlockResponse {
@@ -135,6 +157,7 @@ pub fn build_router<S: BlockStore + Send + 'static>(state: AppState<S>) -> Route
         .route("/block/{pubkey}/{seq}", get(handle_get_block::<S>))
         .route("/crawl/{pubkey}", get(handle_crawl::<S>))
         .route("/peers", get(handle_get_peers::<S>))
+        .route("/discover", get(handle_discover::<S>))
         .with_state(state)
 }
 
@@ -262,7 +285,7 @@ async fn handle_propose<S: BlockStore + 'static>(
 
 /// Derive the QUIC address from a peer's HTTP address.
 /// Peers store HTTP addresses like "127.0.0.1:8202" — QUIC is on port - 2.
-fn peer_quic_addr(http_addr: &str) -> Result<std::net::SocketAddr, String> {
+pub(crate) fn peer_quic_addr(http_addr: &str) -> Result<std::net::SocketAddr, String> {
     let addr = http_addr
         .strip_prefix("http://")
         .unwrap_or(http_addr);
@@ -379,6 +402,125 @@ async fn handle_get_peers<S: BlockStore + 'static>(
         })
         .collect();
     Json(response)
+}
+
+/// P2P capability discovery — find agents by proven interaction history.
+///
+/// Fans out to trusted peers via QUIC, merges results, ranks by trust score.
+async fn handle_discover<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
+    Query(params): Query<DiscoverParams>,
+) -> Json<DiscoverResponse> {
+    let max_results = params.max_results.unwrap_or(20);
+    let min_trust = params.min_trust.unwrap_or(0.0);
+    let fan_out = params.fan_out.unwrap_or(5);
+
+    // 1. Query local blockstore.
+    let mut agents_map: std::collections::HashMap<String, DiscoveredAgent> = {
+        let proto = state.protocol.lock().await;
+        let local = discover::find_capable_agents(proto.store(), &params.capability, max_results);
+        local.into_iter().map(|a| (a.pubkey.clone(), a)).collect()
+    };
+
+    // 2. Fan out to trusted peers via QUIC.
+    let peers = state.discovery.get_gossip_peers(fan_out).await;
+    let queried_peers = peers.len();
+
+    if let Some(quic) = &state.quic {
+        let query = CapabilityQuery {
+            capability: params.capability.clone(),
+            max_results,
+        };
+        let query_bytes = serde_json::to_vec(&query).unwrap_or_default();
+
+        let mut handles = Vec::new();
+        for peer in &peers {
+            let quic = quic.clone();
+            let query_bytes = query_bytes.clone();
+            let peer_addr = peer.address.clone();
+
+            handles.push(tokio::spawn(async move {
+                let quic_addr = peer_quic_addr(&peer_addr)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let msg = TransportMessage::new(
+                    MessageType::CapabilityRequest,
+                    String::new(),
+                    query_bytes,
+                    uuid_v4(),
+                );
+                let msg_bytes = serde_json::to_vec(&msg)?;
+
+                let resp_bytes = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    quic.send_message(quic_addr, &msg_bytes),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("timeout"))?
+                .map_err(|e| anyhow::anyhow!("QUIC: {e}"))?;
+
+                let resp_msg: TransportMessage = serde_json::from_slice(&resp_bytes)?;
+                let agents: Vec<DiscoveredAgent> =
+                    serde_json::from_slice(&resp_msg.payload).unwrap_or_default();
+                Ok::<_, anyhow::Error>(agents)
+            }));
+        }
+
+        for handle in handles {
+            if let Ok(Ok(agents)) = handle.await {
+                for agent in agents {
+                    agents_map
+                        .entry(agent.pubkey.clone())
+                        .and_modify(|existing| {
+                            // Keep the higher interaction count.
+                            existing.interaction_count =
+                                existing.interaction_count.max(agent.interaction_count);
+                            // Prefer an address if we don't have one.
+                            if existing.address.is_none() {
+                                existing.address = agent.address.clone();
+                            }
+                        })
+                        .or_insert(agent);
+                }
+            }
+        }
+    }
+
+    // 3. Compute trust scores (requires protocol lock for store access).
+    {
+        let proto = state.protocol.lock().await;
+        let engine = TrustEngine::new(proto.store(), None, None);
+        for agent in agents_map.values_mut() {
+            agent.trust_score = engine.compute_trust(&agent.pubkey).ok();
+        }
+    }
+
+    // 4. Enrich with addresses from peer discovery.
+    for agent in agents_map.values_mut() {
+        if agent.address.is_none() {
+            if let Some(peer) = state.discovery.get_peer(&agent.pubkey).await {
+                agent.address = Some(peer.address);
+            }
+        }
+    }
+
+    // 5. Filter by min_trust and sort by trust score descending.
+    let mut results: Vec<DiscoveredAgent> = agents_map
+        .into_values()
+        .filter(|a| a.trust_score.unwrap_or(0.0) >= min_trust)
+        .collect();
+
+    results.sort_by(|a, b| {
+        b.trust_score
+            .unwrap_or(0.0)
+            .partial_cmp(&a.trust_score.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(max_results);
+
+    Json(DiscoverResponse {
+        agents: results,
+        queried_peers,
+    })
 }
 
 #[cfg(test)]

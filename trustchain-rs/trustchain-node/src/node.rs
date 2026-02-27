@@ -13,6 +13,7 @@ use trustchain_core::{
 };
 use trustchain_transport::{
     AppState, ConnectionPool, PeerDiscovery, ProxyState, QuicTransport,
+    discover,
     start_grpc_server, start_http_server, start_proxy_server,
     message::{
         BlockPairBroadcastPayload, MessageType, TransportMessage,
@@ -440,6 +441,43 @@ impl Node {
 
                 serde_json::to_vec(&serde_json::json!({"status": "ok"}))
                     .unwrap_or_default()
+            }
+
+            MessageType::CapabilityRequest => {
+                // Deserialize the query.
+                let query: discover::CapabilityQuery = match serde_json::from_slice(&msg.payload) {
+                    Ok(q) => q,
+                    Err(e) => return Self::error_response(&format!("invalid capability query: {e}")),
+                };
+
+                // Scan local blockstore.
+                let agents = {
+                    let proto = protocol.lock().await;
+                    discover::find_capable_agents(
+                        proto.store(),
+                        &query.capability,
+                        query.max_results,
+                    )
+                };
+
+                // Enrich with addresses from peer discovery.
+                let mut enriched = agents;
+                for agent in &mut enriched {
+                    if let Some(peer) = discovery.get_peer(&agent.pubkey).await {
+                        agent.address = Some(peer.address);
+                    }
+                }
+
+                let resp = TransportMessage::new(
+                    MessageType::CapabilityResponse,
+                    {
+                        let proto = protocol.lock().await;
+                        proto.pubkey()
+                    },
+                    serde_json::to_vec(&enriched).unwrap_or_default(),
+                    msg.request_id,
+                );
+                serde_json::to_vec(&resp).unwrap_or_default()
             }
 
             MessageType::HalfBlockBroadcast => {
