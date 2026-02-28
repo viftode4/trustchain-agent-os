@@ -19,7 +19,7 @@ jobs:
       - name: Check out trustchain-sdk (sibling dependency)
         uses: actions/checkout@v4
         with:
-          repository: levvlad/trustchain-sdk
+          repository: viftode4/trustchain-sdk
           path: trustchain-sdk
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -44,7 +44,7 @@ jobs:
       - name: Check out trustchain-sdk (sibling dependency)
         uses: actions/checkout@v4
         with:
-          repository: levvlad/trustchain-sdk
+          repository: viftode4/trustchain-sdk
           path: trustchain-sdk
 
       - name: Set up Python
