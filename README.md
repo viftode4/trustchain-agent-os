@@ -1,29 +1,43 @@
-# TrustChain
+# TrustChain Agent OS
 
-**The missing trust layer for AI agents.**
+[![PyPI](https://img.shields.io/pypi/v/trustchain-agent-os.svg)](https://pypi.org/project/trustchain-agent-os/)
+[![CI](https://github.com/levvlad/trustchain-agent-os/actions/workflows/ci.yml/badge.svg)](https://github.com/levvlad/trustchain-agent-os/actions)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Every agent protocol (MCP, A2A, ACP, ANP) handles communication. None handle trust. TrustChain is a bilateral signed ledger where every agent interaction produces cryptographic proof — two half-blocks, independently signed, forming an append-only chain per agent. Trust scores emerge from real interaction history, not ratings. Sybil attacks fail because fake identities have no legitimate transaction graph.
+**Trust-native protocol layer for AI agents.**
 
-Built on the [TrustChain protocol](https://doi.org/10.1016/j.future.2020.01.031) (Otte, de Vos, Pouwelse — TU Delft), extended for AI agent economies.
+Every agent protocol (MCP, A2A, ACP, ANP) handles communication. None handle trust. TrustChain Agent OS is the missing layer underneath all of them — a gateway and a set of framework adapters that bring bilateral signed interaction records, NetFlow Sybil resistance, and automatic trust scoring to LangGraph, CrewAI, AutoGen, OpenAI Agents, Google ADK, and ElizaOS. 179 tests.
+
+Built on [trustchain-sdk](https://github.com/levvlad/trustchain-sdk) and the [trustchain](https://github.com/levvlad/trustchain) Rust node.
+
+## Key Features
+
+- **Framework adapters** — drop-in trust layer for LangGraph, CrewAI, AutoGen, OpenAI Agents, Google ADK, and ElizaOS; no agent code changes required beyond initialization
+- **MCP gateway** — FastAPI server that exposes downstream MCP tool servers behind a trust middleware; every tool call is recorded as a bilateral interaction
+- **Trust-gated services** — `@service` decorator enforces `min_trust` thresholds before any call reaches agent business logic
+- **TrustAgent primitive** — lightweight agent abstraction with built-in identity, trust tracking, and service registry
+- **Automatic trust accumulation** — interaction history builds over time; trust scores improve as parties transact honestly
+- **Fraud resistance** — double-spend detection and hard-zero scoring propagate across the interaction graph
+
+## Installation
+
+```bash
+pip install trustchain-agent-os
+```
+
+### Optional extras
+
+```bash
+pip install trustchain-agent-os[gateway]   # FastAPI + uvicorn for the MCP gateway
+pip install trustchain-agent-os[viz]       # Streamlit + Plotly trust graph visualizations
+pip install trustchain-agent-os[dev]       # pytest + pytest-asyncio
+```
+
+Requires Python 3.11+. Depends on `trustchain-sdk>=2.0` and `fastmcp>=3.0`.
 
 ## Quick Start
 
-### Zero-config (Python + Rust sidecar)
-
-```python
-import trustchain
-trustchain.init()  # downloads sidecar binary, spawns it, sets HTTP_PROXY
-# All outbound HTTP calls are now trust-protected. Done.
-```
-
-### One-liner (Rust sidecar directly)
-
-```bash
-trustchain-node sidecar --name my-agent --endpoint http://localhost:8080
-# Transparent proxy on :8203 — set HTTP_PROXY and forget
-```
-
-### Full control (Python SDK)
+### TrustAgent (minimal)
 
 ```python
 import asyncio
@@ -39,229 +53,195 @@ async def compute(data: dict, ctx: TrustContext) -> dict:
 async def main():
     for i in range(1, 11):
         ok, reason, result = await buyer.call_service(seller, "compute", {"x": i})
-        print(f"Round {i}: {i}² = {result['result']}  "
-              f"| buyer={buyer.trust_score:.3f}  seller={seller.trust_score:.3f}")
+        print(
+            f"Round {i}: {i}^2 = {result['result']}"
+            f"  buyer={buyer.trust_score:.3f}  seller={seller.trust_score:.3f}"
+        )
 
 asyncio.run(main())
 ```
 
-## How It Works
+Trust scores grow with every completed interaction. After a few rounds the seller can raise `min_trust` to gate access to higher-value services.
 
-TrustChain runs as a **sidecar** next to each agent — a transparent HTTP proxy that intercepts all agent-to-agent calls. Agents don't call TrustChain directly; they set `HTTP_PROXY` once and interact normally. Every call produces a bilateral cryptographic record. Trust accumulates automatically.
+### Trust-gated service
 
-```
-  Agent A                    Agent B
-    │                          │
-    │  HTTP call               │
-    ▼                          ▼
-┌────────┐   QUIC P2P    ┌────────┐
-│Sidecar │◄──────────────►│Sidecar │
-│ :8203  │  proposal/     │ :8203  │
-│        │  agreement     │        │
-└────────┘                └────────┘
-    │                          │
-    ▼                          ▼
-  SQLite                    SQLite
-  (chain)                   (chain)
+```python
+@seller.service("premium_analysis", min_trust=0.7)
+async def premium_analysis(data: dict, ctx: TrustContext) -> dict:
+    # Only reachable after the buyer has established sufficient trust history
+    return {"analysis": "..."}
 ```
 
-Trust is **decoupled from discovery** — any discovery source (registry, A2A, MCP, DNS, P2P gossip) returns `(endpoint, pubkey)`, and the trust layer handles the rest. Registries can't fake trust.
+### MCP gateway
 
-## Why TrustChain
+```python
+# gateway/server.py — run with: uvicorn gateway.server:app
+from gateway import create_gateway
 
-| Problem | Current State | TrustChain |
-|---------|--------------|------------|
-| Agent A calls Agent B | Blind trust or API keys | Bilateral signed proof of every interaction |
-| Sybil attacks | Star ratings, trivially faked | Max-flow graph analysis (NetFlow) — fake nodes can't create real transaction paths |
-| "Who do I trust?" | Centralized registries | Decentralized — each agent computes trust from its own chain view |
-| Accountability | Logs (mutable, unilateral) | Append-only chains with hash links — tampering is detectable |
-| Cold start | No data, no trust | Bootstrap interactions, then earn trust through real history |
+app = create_gateway(
+    upstream_servers=[
+        {"name": "tools", "url": "http://localhost:3000/mcp"},
+    ],
+    trust_threshold=0.5,   # minimum trust score to call any tool
+)
+```
+
+```bash
+pip install trustchain-agent-os[gateway]
+uvicorn gateway.server:app --port 8080
+```
+
+Every tool call arriving at the gateway is checked against the caller's trust score. The result is recorded as a bilateral interaction block, building the caller's trust history over time.
+
+## Framework Adapters
+
+Each adapter wraps a framework's native agent/crew/graph abstraction to add TrustChain identity and bilateral interaction recording. Adapters share a common interface through `tc_frameworks.base.TrustChainAdapter`.
+
+### LangGraph
+
+```python
+from tc_frameworks.adapters.langgraph_adapter import LangGraphTrustAdapter
+
+adapter = LangGraphTrustAdapter(agent_name="my-langgraph-agent")
+result = await adapter.invoke({"messages": [{"role": "user", "content": "hello"}]})
+```
+
+### CrewAI
+
+```python
+from tc_frameworks.adapters.crewai_adapter import CrewAITrustAdapter
+
+adapter = CrewAITrustAdapter(agent_name="my-crew")
+result = await adapter.invoke({"task": "summarize recent news"})
+```
+
+### AutoGen
+
+```python
+from tc_frameworks.adapters.autogen_adapter import AutoGenTrustAdapter
+
+adapter = AutoGenTrustAdapter(agent_name="my-autogen-agent")
+result = await adapter.invoke({"message": "analyze this dataset"})
+```
+
+### OpenAI Agents SDK
+
+```python
+from tc_frameworks.adapters.openai_agents_adapter import OpenAIAgentsTrustAdapter
+
+adapter = OpenAIAgentsTrustAdapter(agent_name="my-openai-agent")
+result = await adapter.invoke({"input": "draft an email"})
+```
+
+### Google ADK
+
+```python
+from tc_frameworks.adapters.google_adk_adapter import GoogleADKTrustAdapter
+
+adapter = GoogleADKTrustAdapter(agent_name="my-adk-agent")
+result = await adapter.invoke({"query": "search for recent papers"})
+```
+
+### ElizaOS
+
+```python
+from tc_frameworks.adapters.elizaos_adapter import ElizaOSTrustAdapter
+
+adapter = ElizaOSTrustAdapter(agent_name="my-eliza-agent")
+result = await adapter.invoke({"message": "hello"})
+```
+
+All adapters are cached — the underlying agent/crew/graph is built once on first invocation and reused across calls.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  Your Agent (any framework: LangGraph, CrewAI, AutoGen, A2A...) │
-│  Just set HTTP_PROXY=http://127.0.0.1:8203                      │
-├──────────────────────────────────────────────────────────────────┤
-│  Transparent Proxy (:8203)                                       │
-│  Intercepts HTTP → resolves peer → bilateral handshake → forward │
-├──────────────────────────────────────────────────────────────────┤
-│  HTTP REST API (:8202)          │  gRPC API (:50051)             │
-│  /propose /peers /trust /chain  │  Protobuf-native agent API     │
-├──────────────────────────────────────────────────────────────────┤
-│  QUIC P2P Transport (:8200)                                      │
-│  TLS 1.3 mutual auth · rate limiting · connection reuse          │
-│  Proposal/agreement · fraud proofs · CHECO checkpoints · gossip  │
-├──────────────────────────────────────────────────────────────────┤
-│  TrustEngine: NetFlow (Sybil resistance) + chain integrity +     │
-│  statistical scoring · fraud penalty (hard zero for double-spend) │
-├──────────────────────────────────────────────────────────────────┤
-│  Protocol: proposal/agreement half-blocks · Ed25519 signatures   │
-│  Tiered validation · double-sign/double-countersign detection    │
-├──────────────────────────────────────────────────────────────────┤
-│  SQLite (prod, WAL mode) / Memory (test) · peer persistence      │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-## Trust Scoring
-
-Three-component weighted trust via `TrustEngine`:
-
-| Component | Weight | What it measures |
-|-----------|--------|-----------------|
-| **Chain Integrity** | 30% | Hash links valid, no gaps, all signatures verify |
-| **NetFlow Score** | 40% | Max-flow from seed nodes through transaction graph — Sybil resistance |
-| **Statistical Score** | 30% | Interaction volume, completion rate, counterparty diversity, account age, entropy |
-
-Agents with proven double-spend fraud receive **hard zero** trust — no recovery.
-
-## Protocol
-
-Based on [IETF draft-pouwelse-trustchain](https://datatracker.ietf.org/doc/draft-pouwelse-trustchain/):
-
-1. **Half-block model** — Each agent creates and signs their own block. No shared state.
-2. **Proposal/Agreement flow** — A proposes `(seq, link_to_B, transaction, signature)`. B validates, creates agreement linking back. Both store both blocks.
-3. **Hash-linked chains** — Every block references the previous block's hash. Gaps and forks are detectable.
-4. **Ed25519 signatures** — Every block is signed by its creator only. Non-repudiable.
-
-```
-Alice's chain:        Bob's chain:
-┌──────────┐          ┌──────────┐
-│ PROPOSAL │─────────→│ AGREEMENT│
-│ seq=1    │←─────────│ seq=1    │
-│ sig=Alice│          │ sig=Bob  │
-└──────────┘          └──────────┘
-     ↑                      ↑
-  prev_hash              prev_hash
-     ↑                      ↑
-┌──────────┐          ┌──────┐
-│ PROPOSAL │─────────→│ AGREE│
-│ seq=2    │←─────────│ seq=2│
-└──────────┘          └──────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Your Agent (LangGraph / CrewAI / AutoGen / OpenAI / ADK / ...) │
+├──────────────────────────┬──────────────────────────────────────┤
+│  tc_frameworks adapters  │  agent_os.TrustAgent + decorators    │
+│  (per-framework wrappers)│  (lightweight agent primitive)       │
+├──────────────────────────┴──────────────────────────────────────┤
+│  gateway/                                                        │
+│  FastAPI MCP gateway · trust middleware · interaction recorder  │
+│  peer registry · trust_tools (MCP tool wrappers)               │
+├─────────────────────────────────────────────────────────────────┤
+│  trustchain-sdk  (Python)                                        │
+│  Identity · HalfBlock · BlockStore · TrustEngine · NetFlow      │
+├─────────────────────────────────────────────────────────────────┤
+│  trustchain-node  (Rust sidecar, optional)                       │
+│  QUIC P2P · SQLite WAL · transparent proxy :8203                │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Project Structure
 
 ```
-trustchain/                  # Rust production node (4 crates, 166 tests)
-  trustchain-core/              #   Identity, HalfBlock, BlockStore, Protocol,
-                                #   TrustEngine, NetFlow, Consensus, Crawler
-  trustchain-transport/         #   QUIC, gRPC, HTTP, proxy, discovery, STUN
-  trustchain-node/              #   CLI binary: run / sidecar / keygen / status
-  trustchain-wasm/              #   WASM bindings (browser/edge)
-  Dockerfile                    #   Multi-stage container build
-  deploy/                       #   systemd service, Docker config
-  .github/workflows/            #   CI/CD (build, test, release)
-
-trustchain/                     # Python protocol bindings
-  sidecar.py                    #   Zero-config sidecar SDK (trustchain.init())
-agent_os/                       # Agent SDK (TrustAgent, decorators)
-gateway/                        # MCP Gateway with trust middleware
-tc_frameworks/                  # Framework adapters (LangGraph, CrewAI, AutoGen...)
-examples/                       # Usage examples
-tests/                          # Python test suite
+trustchain-agent-os/
+├── agent_os/
+│   ├── agent.py          TrustAgent: identity, service registry, call_service
+│   ├── context.py        TrustContext: per-call trust metadata
+│   └── decorators.py     @service decorator with min_trust enforcement
+│
+├── gateway/
+│   ├── server.py         FastAPI application factory (create_gateway)
+│   ├── middleware.py     Trust enforcement middleware
+│   ├── recorder.py       Bilateral interaction recording
+│   ├── registry.py       Peer and upstream server registry
+│   ├── node.py           TrustChain node lifecycle management
+│   ├── config.py         Gateway configuration (UpstreamServer, GatewayConfig)
+│   └── trust_tools.py    MCP tool wrappers with trust metadata
+│
+├── tc_frameworks/
+│   ├── base.py           TrustChainAdapter base class
+│   ├── adapters/         Real framework adapters (6)
+│   │   ├── langgraph_adapter.py
+│   │   ├── crewai_adapter.py
+│   │   ├── autogen_adapter.py
+│   │   ├── openai_agents_adapter.py
+│   │   ├── google_adk_adapter.py
+│   │   └── elizaos_adapter.py
+│   └── mock/             Mock adapters for testing (6, mirror structure above)
+│
+├── examples/             Runnable examples
+│   ├── hello_trust.py    Minimal TrustAgent demo
+│   ├── marketplace.py    Multi-agent marketplace simulation
+│   ├── network.py        P2P network simulation
+│   ├── trust_gate.py     Trust-gated service demo
+│   ├── llm_agents.py     LLM-backed agents with trust
+│   └── demo_gateway.py   MCP gateway demo
+│
+└── tests/
+    ├── integration/      126 integration tests
+    └── smoke/            45 smoke, e2e, and stress tests
 ```
 
-## Install
+## Why TrustChain vs. API Keys
 
-### Rust node (recommended for production)
+| Problem | API Keys / OAuth | TrustChain |
+|---------|-----------------|------------|
+| Agent A calls Agent B | Credential exchange, shared secrets | Bilateral signed proof; no shared secrets |
+| Sybil attacks | Trivially circumvented with new accounts | Max-flow graph analysis — fake identities cannot create real transaction paths |
+| "Who do I trust?" | Centralized registries | Each agent computes trust from its own chain view |
+| Accountability | Server logs (mutable, unilateral) | Append-only chains with hash links — tampering is cryptographically detectable |
+| Cold start | Credentials granted upfront | Bootstrap interactions, then earn trust through real history |
+| Discovery | Registry must be trusted | Any discovery source returns `(endpoint, pubkey)`; trust is ground truth from the bilateral ledger |
 
-```bash
-# From source
-cd trustchain && cargo build --release
-# Binary at target/release/trustchain-node
-
-# Or via Docker
-docker build -t trustchain trustchain/
-docker run -v trustchain-data:/data trustchain
-```
-
-### Python SDK
+## Development
 
 ```bash
-pip install trustchain-agent-os
-
-# Or from source
-git clone https://github.com/viftode4/trustchain-agent-os.git
+git clone https://github.com/levvlad/trustchain-agent-os.git
 cd trustchain-agent-os
 pip install -e ".[dev]"
+pytest tests/ -v
 ```
 
-### Run tests
+The CI pipeline checks out `trustchain-sdk` from its sibling repository before install.
 
-```bash
-# Rust (166 tests)
-cd trustchain && cargo test --workspace
+## Related Projects
 
-# Python
-python -m pytest tests/ -v
-```
-
-## Deployment
-
-### Sidecar mode (one agent)
-
-```bash
-trustchain-node sidecar \
-  --name my-agent \
-  --endpoint http://localhost:8080 \
-  --advertise http://203.0.113.5:8202 \
-  --bootstrap http://seed1.example.com:8202
-```
-
-### Full node
-
-```bash
-trustchain-node run --config node.toml
-```
-
-### Docker
-
-```bash
-docker run -d \
-  -p 8200:8200 -p 8202:8202 -p 50051:50051 \
-  -v trustchain-data:/data \
-  trustchain
-```
-
-### systemd
-
-```bash
-sudo cp deploy/trustchain.service /etc/systemd/system/
-sudo systemctl enable --now trustchain
-```
-
-## Features
-
-- **Transparent proxy** — agents set `HTTP_PROXY` once, trust is invisible
-- **P2P capability discovery** — find agents by proven interaction history, not self-reported claims
-- **QUIC transport** — TLS 1.3 mutual auth, rate limiting (per-IP), connection reuse
-- **CHECO consensus** — periodic checkpoint blocks for finality, facilitator rotation
-- **Fraud detection** — tiered validation, double-sign/double-countersign detection, fraud propagation with TTL relay
-- **STUN NAT traversal** — automatic public address discovery
-- **Peer persistence** — SQLite WAL mode, peers survive restarts
-- **Graceful shutdown** — clean ctrl-c handling
-
-## Research Foundation
-
-Based on the TrustChain protocol from the [TU Delft Blockchain Lab](https://www.tudelft.nl/ewi/over-de-faculteit/afdelingen/software-technology/distributed-systems/people/johan-pouwelse) (Distributed Systems Group).
-
-**Core paper**: Otte, de Vos, Pouwelse — [TrustChain: A Sybil-resistant scalable blockchain](https://doi.org/10.1016/j.future.2020.01.031) (Future Generation Computer Systems, 2020)
-
-Key contributions realized in this implementation:
-- **Half-block architecture** (Section 3.1) — each party signs only their own block
-- **NetFlow-based Sybil resistance** (Section 4) — trust via max-flow from seed nodes
-- **Scalability through bilateral accountability** — linear scaling, no miners, no gas fees
-
-**Extension for AI agents**: transparent sidecar model, trust-gated services, MCP gateway integration, framework adapters, QUIC P2P + gRPC + HTTP transport stack.
-
-## References
-
-- Otte, de Vos, Pouwelse — [TrustChain: A Sybil-resistant scalable blockchain](https://doi.org/10.1016/j.future.2020.01.031) (Future Generation Computer Systems, 2020)
-- [IETF draft-pouwelse-trustchain-01](https://datatracker.ietf.org/doc/draft-pouwelse-trustchain/) — Protocol specification
-- [py-ipv8](https://github.com/Tribler/py-ipv8) — TU Delft reference implementation (Python)
-- [kotlin-ipv8](https://github.com/Tribler/kotlin-ipv8) — Mobile implementation (Kotlin/Android)
+- [trustchain](https://github.com/levvlad/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 181 tests
+- [trustchain-sdk](https://github.com/levvlad/trustchain-sdk) — Python SDK: zero-config `trustchain.init()`, full protocol bindings, 290 tests
 
 ## License
 
