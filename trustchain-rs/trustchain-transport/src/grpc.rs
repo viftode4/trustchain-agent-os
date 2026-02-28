@@ -148,7 +148,10 @@ impl<S: BlockStore + 'static> proto::trust_chain_service_server::TrustChainServi
                 public_key: p.pubkey.clone(),
                 address: p.address.clone(),
                 latest_seq: p.latest_seq,
-                last_seen: p.last_seen.elapsed().as_secs_f64(),
+                last_seen: {
+                    let now = crate::discovery::now_unix_ms();
+                    (now.saturating_sub(p.last_seen_unix_ms) as f64) / 1000.0
+                },
             })
             .collect();
 
@@ -185,7 +188,10 @@ impl<S: BlockStore + 'static> proto::trust_chain_service_server::TrustChainServi
                 public_key: p.pubkey.clone(),
                 address: p.address.clone(),
                 latest_seq: p.latest_seq,
-                last_seen: p.last_seen.elapsed().as_secs_f64(),
+                last_seen: {
+                    let now = crate::discovery::now_unix_ms();
+                    (now.saturating_sub(p.last_seen_unix_ms) as f64) / 1000.0
+                },
             })
             .collect();
 

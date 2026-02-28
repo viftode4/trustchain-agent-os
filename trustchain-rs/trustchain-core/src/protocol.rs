@@ -55,7 +55,7 @@ impl<S: BlockStore> TrustChainProtocol<S> {
         &mut self,
         counterparty_pubkey: &str,
         transaction: serde_json::Value,
-        timestamp: Option<f64>,
+        timestamp: Option<u64>,
     ) -> Result<HalfBlock> {
         let seq = self.store.get_latest_seq(&self.pubkey())? + 1;
         let prev_hash = self.store.get_head_hash(&self.pubkey())?;
@@ -135,7 +135,7 @@ impl<S: BlockStore> TrustChainProtocol<S> {
     pub fn create_agreement(
         &mut self,
         proposal: &HalfBlock,
-        timestamp: Option<f64>,
+        timestamp: Option<u64>,
     ) -> Result<HalfBlock> {
         // Must be a proposal block.
         if !proposal.is_proposal() {
@@ -360,7 +360,7 @@ mod tests {
         let bob_key = Identity::from_bytes(&[2u8; 32]).pubkey_hex();
 
         let proposal = alice
-            .create_proposal(&bob_key, serde_json::json!({"service": "compute"}), Some(1000.0))
+            .create_proposal(&bob_key, serde_json::json!({"service": "compute"}), Some(1000))
             .unwrap();
 
         assert_eq!(proposal.sequence_number, 1);
@@ -379,7 +379,7 @@ mod tests {
             .create_proposal(
                 &bob.pubkey(),
                 serde_json::json!({"service": "compute", "amount": 100}),
-                Some(1000.0),
+                Some(1000),
             )
             .unwrap();
 
@@ -387,7 +387,7 @@ mod tests {
         assert!(bob.receive_proposal(&proposal).unwrap());
 
         // Bob creates agreement.
-        let agreement = bob.create_agreement(&proposal, Some(1001.0)).unwrap();
+        let agreement = bob.create_agreement(&proposal, Some(1001)).unwrap();
         assert!(agreement.is_agreement());
         assert_eq!(agreement.link_public_key, alice.pubkey());
         assert_eq!(agreement.link_sequence_number, proposal.sequence_number);
@@ -410,12 +410,12 @@ mod tests {
                 .create_proposal(
                     &bob.pubkey(),
                     serde_json::json!({"round": i}),
-                    Some(1000.0 + i as f64 * 2.0),
+                    Some(1000 + i as u64 * 2),
                 )
                 .unwrap();
 
             bob.receive_proposal(&proposal).unwrap();
-            let agreement = bob.create_agreement(&proposal, Some(1001.0 + i as f64 * 2.0)).unwrap();
+            let agreement = bob.create_agreement(&proposal, Some(1001 + i as u64 * 2)).unwrap();
             alice.receive_agreement(&agreement).unwrap();
         }
 
@@ -436,7 +436,7 @@ mod tests {
 
         // Alice proposes to Charlie, not Bob.
         let proposal = alice
-            .create_proposal(&charlie_key, serde_json::json!({}), Some(1000.0))
+            .create_proposal(&charlie_key, serde_json::json!({}), Some(1000))
             .unwrap();
 
         // Bob should reject it.
@@ -453,11 +453,11 @@ mod tests {
         );
 
         let proposal = alice
-            .create_proposal(&bob.pubkey(), serde_json::json!({}), Some(1000.0))
+            .create_proposal(&bob.pubkey(), serde_json::json!({}), Some(1000))
             .unwrap();
 
         bob.receive_proposal(&proposal).unwrap();
-        let agreement = bob.create_agreement(&proposal, Some(1001.0)).unwrap();
+        let agreement = bob.create_agreement(&proposal, Some(1001)).unwrap();
 
         // Charlie should reject the agreement (it links to Alice, not Charlie).
         let result = charlie.receive_agreement(&agreement);
@@ -469,12 +469,12 @@ mod tests {
         let (mut alice, mut bob) = make_protocol();
 
         let proposal = alice
-            .create_proposal(&bob.pubkey(), serde_json::json!({}), Some(1000.0))
+            .create_proposal(&bob.pubkey(), serde_json::json!({}), Some(1000))
             .unwrap();
 
         // Bob creates agreement without first receiving the proposal.
         bob.receive_proposal(&proposal).unwrap();
-        let agreement = bob.create_agreement(&proposal, Some(1001.0)).unwrap();
+        let agreement = bob.create_agreement(&proposal, Some(1001)).unwrap();
 
         // Create a fresh Alice that doesn't have the proposal in store.
         let mut alice2 = TrustChainProtocol::new(
@@ -493,7 +493,7 @@ mod tests {
             .create_proposal(
                 &bob.pubkey(),
                 serde_json::json!({"service": "compute"}),
-                Some(1000.0),
+                Some(1000),
             )
             .unwrap();
 
@@ -504,7 +504,7 @@ mod tests {
         tampered_proposal.transaction = serde_json::json!({"service": "FAKE"});
         // Bob would create agreement with wrong transaction — but create_agreement
         // copies from proposal, so we'd need to tamper post-creation.
-        let agreement = bob.create_agreement(&proposal, Some(1001.0)).unwrap();
+        let agreement = bob.create_agreement(&proposal, Some(1001)).unwrap();
 
         // Tamper the agreement after creation.
         let mut tampered_agreement = agreement.clone();
@@ -521,10 +521,10 @@ mod tests {
 
         for i in 0..3 {
             let proposal = alice
-                .create_proposal(&bob.pubkey(), serde_json::json!({"i": i}), Some(1000.0 + i as f64))
+                .create_proposal(&bob.pubkey(), serde_json::json!({"i": i}), Some(1000 + i as u64))
                 .unwrap();
             bob.receive_proposal(&proposal).unwrap();
-            let agreement = bob.create_agreement(&proposal, Some(1001.0 + i as f64)).unwrap();
+            let agreement = bob.create_agreement(&proposal, Some(1001 + i as u64)).unwrap();
             alice.receive_agreement(&agreement).unwrap();
         }
 
@@ -542,10 +542,10 @@ mod tests {
         let (mut alice, mut bob) = make_protocol();
 
         let proposal = alice
-            .create_proposal(&bob.pubkey(), serde_json::json!({}), Some(1000.0))
+            .create_proposal(&bob.pubkey(), serde_json::json!({}), Some(1000))
             .unwrap();
         bob.receive_proposal(&proposal).unwrap();
-        let agreement = bob.create_agreement(&proposal, Some(1001.0)).unwrap();
+        let agreement = bob.create_agreement(&proposal, Some(1001)).unwrap();
         alice.receive_agreement(&agreement).unwrap();
 
         assert!(alice.validate_chain(&alice.pubkey()).unwrap());
@@ -558,12 +558,12 @@ mod tests {
 
         for i in 1..=3 {
             let proposal = alice
-                .create_proposal(&bob.pubkey(), serde_json::json!({"i": i}), Some(1000.0 + i as f64))
+                .create_proposal(&bob.pubkey(), serde_json::json!({"i": i}), Some(1000 + i as u64))
                 .unwrap();
             assert_eq!(proposal.sequence_number, i);
 
             bob.receive_proposal(&proposal).unwrap();
-            let agreement = bob.create_agreement(&proposal, Some(1001.0 + i as f64)).unwrap();
+            let agreement = bob.create_agreement(&proposal, Some(1001 + i as u64)).unwrap();
             assert_eq!(agreement.sequence_number, i);
 
             alice.receive_agreement(&agreement).unwrap();
@@ -575,16 +575,16 @@ mod tests {
         let (mut alice, mut bob) = make_protocol();
 
         let p1 = alice
-            .create_proposal(&bob.pubkey(), serde_json::json!({"i": 1}), Some(1000.0))
+            .create_proposal(&bob.pubkey(), serde_json::json!({"i": 1}), Some(1000))
             .unwrap();
         assert_eq!(p1.previous_hash, GENESIS_HASH);
 
         bob.receive_proposal(&p1).unwrap();
-        let a1 = bob.create_agreement(&p1, Some(1001.0)).unwrap();
+        let a1 = bob.create_agreement(&p1, Some(1001)).unwrap();
         alice.receive_agreement(&a1).unwrap();
 
         let p2 = alice
-            .create_proposal(&bob.pubkey(), serde_json::json!({"i": 2}), Some(1002.0))
+            .create_proposal(&bob.pubkey(), serde_json::json!({"i": 2}), Some(1002))
             .unwrap();
         assert_eq!(p2.previous_hash, p1.block_hash);
     }

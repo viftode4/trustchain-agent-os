@@ -26,8 +26,8 @@ pub struct Checkpoint {
     pub checkpoint_block: HalfBlock,
     /// Co-signatures: `{pubkey: signature_hex}`.
     pub signatures: HashMap<String, String>,
-    /// Timestamp of checkpoint creation.
-    pub timestamp: f64,
+    /// Timestamp of checkpoint creation (milliseconds since epoch).
+    pub timestamp: u64,
     /// Whether this checkpoint has been finalized.
     pub finalized: bool,
 }
@@ -117,6 +117,11 @@ impl<S: BlockStore> CHECOConsensus<S> {
         Ok(candidates[index].clone())
     }
 
+    /// Update the set of known peers (called each checkpoint round from discovery).
+    pub fn set_known_peers(&mut self, peers: Vec<String>) {
+        self.known_peers = peers;
+    }
+
     /// Check if this agent is the current facilitator.
     pub fn is_facilitator(&self) -> Result<bool> {
         Ok(self.select_facilitator()? == self.pubkey())
@@ -150,7 +155,7 @@ impl<S: BlockStore> CHECOConsensus<S> {
         let prev_hash = self.store.get_head_hash(&my_pubkey)?;
 
         let checkpoint_round = self.checkpoints.len() as u64 + 1;
-        let timestamp_val = crate::halfblock::now_timestamp();
+        let timestamp_val = crate::halfblock::now_timestamp_ms();
 
         let transaction = serde_json::json!({
             "interaction_type": "checkpoint",
@@ -195,20 +200,18 @@ impl<S: BlockStore> CHECOConsensus<S> {
                     if let Some(claimed_seq) = seq_val.as_u64() {
                         let our_seq = self.store.get_latest_seq(pubkey)?;
                         if our_seq > 0 {
-                            // Reject stale checkpoints (Python's check).
+                            // Reject clearly stale checkpoints where we have more
+                            // recent knowledge than the facilitator claims.
                             if our_seq > claimed_seq {
                                 return Err(TrustChainError::checkpoint(format!(
                                     "stale checkpoint: we know seq {our_seq} for {}, checkpoint claims {claimed_seq}",
                                     &pubkey[..8]
                                 )));
                             }
-                            // Reject future claims we can't verify.
-                            if claimed_seq > our_seq {
-                                return Err(TrustChainError::checkpoint(format!(
-                                    "checkpoint claims seq {claimed_seq} for {}, but we only know {our_seq}",
-                                    &pubkey[..8]
-                                )));
-                            }
+                            // Do NOT reject if claimed_seq > our_seq — the facilitator
+                            // may have received blocks via gossip that we haven't yet.
+                            // In an active network this is normal and should not block
+                            // checkpoint finalization.
                         }
                     }
                 }
@@ -322,7 +325,7 @@ mod tests {
         let proposal = create_half_block(
             alice, alice_seq, &bob.pubkey_hex(), 0,
             alice_prev, BlockType::Proposal,
-            serde_json::json!({"service": "test"}), Some(1000.0),
+            serde_json::json!({"service": "test"}), Some(1000),
         );
         let hash = proposal.block_hash.clone();
         store.add_block(&proposal).unwrap();

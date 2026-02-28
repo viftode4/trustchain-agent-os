@@ -15,6 +15,7 @@ pub mod message;
 pub mod pool;
 pub mod proxy;
 pub mod quic;
+pub mod stun;
 pub mod tls;
 pub mod transport;
 

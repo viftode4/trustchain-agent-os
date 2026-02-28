@@ -57,6 +57,12 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         bootstrap: Vec<String>,
 
+        /// Public HTTP address to advertise to other nodes.
+        /// Required on public servers: e.g. http://203.0.113.5:8202
+        /// If omitted, STUN discovery is attempted automatically.
+        #[arg(long)]
+        advertise: Option<String>,
+
         /// Data directory. Defaults to ~/.trustchain/<name>/.
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -141,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
             endpoint,
             port_base,
             bootstrap,
+            advertise,
             data_dir,
             log_level,
         } => {
@@ -186,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
                 bootstrap_nodes: bootstrap,
                 agent_name: Some(name.clone()),
                 agent_endpoint: Some(endpoint.clone()),
+                advertise_addr: advertise,
                 ..NodeConfig::default()
             };
 

@@ -38,8 +38,8 @@ pub struct HalfBlock {
     pub transaction: serde_json::Value,
     /// SHA-256 hash of the block (64 hex chars).
     pub block_hash: String,
-    /// Unix timestamp (seconds since epoch, with fractional part).
-    pub timestamp: f64,
+    /// Unix timestamp in milliseconds since epoch.
+    pub timestamp: u64,
 }
 
 impl HalfBlock {
@@ -146,12 +146,12 @@ impl std::fmt::Display for HalfBlock {
     }
 }
 
-/// Get the current Unix timestamp as f64.
-pub fn now_timestamp() -> f64 {
+/// Get the current Unix timestamp in milliseconds.
+pub fn now_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
-        .as_secs_f64()
+        .as_millis() as u64
 }
 
 /// Create, hash, and sign a half-block in one call.
@@ -163,7 +163,7 @@ pub fn create_half_block(
     previous_hash: &str,
     block_type: BlockType,
     transaction: serde_json::Value,
-    timestamp: Option<f64>,
+    timestamp: Option<u64>,
 ) -> HalfBlock {
     let mut block = HalfBlock {
         public_key: identity.pubkey_hex(),
@@ -175,7 +175,7 @@ pub fn create_half_block(
         block_type: block_type.to_string(),
         transaction,
         block_hash: String::new(),
-        timestamp: timestamp.unwrap_or_else(now_timestamp),
+        timestamp: timestamp.unwrap_or_else(now_timestamp_ms),
     };
 
     // Compute hash (with signature="").
@@ -232,10 +232,7 @@ pub fn validate_block_invariants(block: &HalfBlock) -> ValidationResult {
         ));
     }
 
-    // 3. Timestamp sanity.
-    if block.timestamp < 0.0 {
-        errors.push("Timestamp cannot be negative".to_string());
-    }
+    // 3. Timestamp sanity (u64 — always non-negative, no check needed).
 
     // 4. Public key format (64 hex chars = 32 bytes).
     if block.public_key.len() != 64 || !block.public_key.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -246,7 +243,7 @@ pub fn validate_block_invariants(block: &HalfBlock) -> ValidationResult {
     if errors.iter().all(|e| e != "Public key is not valid") {
         match verify_block(block) {
             Ok(false) => errors.push("Invalid signature".to_string()),
-            Err(_) => errors.push("Invalid signature".to_string()),
+            Err(e) => errors.push(format!("Signature verification failed: {e}")),
             Ok(true) => {}
         }
     }
@@ -342,15 +339,19 @@ pub fn validate_block<S: BlockStore>(block: &HalfBlock, store: &S) -> Validation
     // Step 4: Linked consistency — if the linked block exists, cross-check.
     if block.link_sequence_number != UNKNOWN_SEQ {
         if let Ok(Some(link)) = store.get_block(&block.link_public_key, block.link_sequence_number) {
-            // The link should point back to us.
-            if link.link_public_key != block.public_key && link.link_sequence_number != UNKNOWN_SEQ {
+            // The linked block (proposal) must point back to us — regardless of whether
+            // its own link_sequence_number is known. Proposals always have UNKNOWN_SEQ
+            // for their link, so the original `&&` guard was dead code that silently
+            // let pubkey mismatches through.
+            if link.link_public_key != block.public_key {
                 errors.push("Public key mismatch on linked block".to_string());
             }
             // Check for double-countersign: if link already has a different linked block.
+            // Proposals always have UNKNOWN_SEQ for their own link_sequence_number, so the
+            // original `&& link.link_sequence_number != UNKNOWN_SEQ` guard was dead code that
+            // silently allowed double-countersign through — removed to match paper §3.3.
             if let Ok(Some(link_linked)) = store.get_linked_block(&link) {
-                if link_linked.block_hash != block.block_hash
-                    && link.link_sequence_number != UNKNOWN_SEQ
-                {
+                if link_linked.block_hash != block.block_hash {
                     errors.push("Double countersign fraud".to_string());
                 }
             }
@@ -431,7 +432,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({"service": "compute"}),
-            Some(1000.0),
+            Some(1000),
         );
 
         assert_eq!(block.public_key, id.pubkey_hex());
@@ -454,7 +455,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({}),
-            Some(1000.0),
+            Some(1000),
         );
 
         assert!(verify_block(&block).unwrap());
@@ -471,7 +472,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({}),
-            Some(1000.0),
+            Some(1000),
         );
 
         // Tamper with the transaction.
@@ -491,7 +492,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({"key": "value"}),
-            Some(1000.0),
+            Some(1000),
         );
 
         // Hash should be the same when recomputed.
@@ -510,7 +511,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({"a": 1}),
-            Some(1000.0),
+            Some(1000),
         );
         let block2 = create_half_block(
             &id,
@@ -520,7 +521,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({"b": 2}),
-            Some(1000.0),
+            Some(1000),
         );
 
         assert_ne!(block1.block_hash, block2.block_hash);
@@ -539,7 +540,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({}),
-            Some(1000.0),
+            Some(1000),
         );
 
         // Replace public key but keep id1's signature.
@@ -561,7 +562,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({}),
-            Some(1000.0),
+            Some(1000),
         );
         let s = format!("{block}");
         assert!(s.contains("seq=1"));
@@ -574,7 +575,7 @@ mod tests {
 
         let proposal = create_half_block(
             &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1000),
         );
         assert!(proposal.is_proposal());
         assert!(!proposal.is_agreement());
@@ -582,7 +583,7 @@ mod tests {
 
         let agreement = create_half_block(
             &id, 2, &"b".repeat(64), 1, &proposal.block_hash,
-            BlockType::Agreement, serde_json::json!({}), Some(1001.0),
+            BlockType::Agreement, serde_json::json!({}), Some(1001),
         );
         assert!(agreement.is_agreement());
         assert!(!agreement.is_proposal());
@@ -599,7 +600,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({}),
-            Some(1000.0),
+            Some(1000),
         );
         assert_eq!(block.previous_hash, GENESIS_HASH);
         assert!(verify_block(&block).unwrap());
@@ -610,7 +611,7 @@ mod tests {
         let id = test_identity();
         let block = create_half_block(
             &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1000),
         );
         let result = validate_block_invariants(&block);
         assert_eq!(result, ValidationResult::Valid);
@@ -621,7 +622,7 @@ mod tests {
         let id = test_identity();
         let block = create_half_block(
             &id, 1, &id.pubkey_hex(), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1000),
         );
         let result = validate_block_invariants(&block);
         assert!(matches!(result, ValidationResult::Invalid(_)));
@@ -636,7 +637,7 @@ mod tests {
         // seq=1 but previous_hash is NOT genesis → invalid
         let mut block = create_half_block(
             &id, 1, &"b".repeat(64), 0, &"a".repeat(64),
-            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1000),
         );
         // Re-sign with the wrong previous hash
         block.block_hash = block.compute_hash();
@@ -651,7 +652,7 @@ mod tests {
         // seq=2 but previous_hash is GENESIS → invalid
         let mut block = create_half_block(
             &id, 2, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1000),
         );
         block.block_hash = block.compute_hash();
         block.signature = id.sign_hex(block.block_hash.as_bytes());
@@ -663,14 +664,15 @@ mod tests {
     }
 
     #[test]
-    fn test_invariant_negative_timestamp() {
+    fn test_timestamp_zero_is_valid() {
+        // u64 timestamps can't be negative; zero is allowed (e.g., test fixtures).
         let id = test_identity();
         let block = create_half_block(
             &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({}), Some(-1.0),
+            BlockType::Proposal, serde_json::json!({}), Some(0),
         );
         let result = validate_block_invariants(&block);
-        assert!(matches!(result, ValidationResult::Invalid(_)));
+        assert!(!matches!(result, ValidationResult::Invalid(_)));
     }
 
     #[test]
@@ -679,7 +681,7 @@ mod tests {
         let id = test_identity();
         let block = create_half_block(
             &id, 1, &id.pubkey_hex(), 0, GENESIS_HASH,
-            BlockType::Checkpoint, serde_json::json!({"checkpoint": true}), Some(1000.0),
+            BlockType::Checkpoint, serde_json::json!({"checkpoint": true}), Some(1000),
         );
         let result = validate_block_invariants(&block);
         // Should NOT have self-sign error (checkpoints are self-referencing).
@@ -695,7 +697,7 @@ mod tests {
         let store = crate::blockstore::MemoryBlockStore::new();
         let block = create_half_block(
             &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1000),
         );
         let result = validate_block(&block, &store);
         assert_eq!(result, ValidationResult::PartialNext);
@@ -707,13 +709,13 @@ mod tests {
         let mut store = crate::blockstore::MemoryBlockStore::new();
         let b1 = create_half_block(
             &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1000),
         );
         store.add_block(&b1).unwrap();
 
         let b2 = create_half_block(
             &id, 2, &"b".repeat(64), 0, &b1.block_hash,
-            BlockType::Proposal, serde_json::json!({}), Some(1001.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1001),
         );
         let result = validate_block(&b2, &store);
         // Has prev (b1), no next → PartialNext.
@@ -726,14 +728,14 @@ mod tests {
         let mut store = crate::blockstore::MemoryBlockStore::new();
         let b1 = create_half_block(
             &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({"tx": "original"}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({"tx": "original"}), Some(1000),
         );
         store.add_block(&b1).unwrap();
 
         // Different block at same seq = double-sign fraud.
         let b1_fraud = create_half_block(
             &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({"tx": "fraud"}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({"tx": "fraud"}), Some(1000),
         );
         let result = validate_block(&b1_fraud, &store);
         assert!(matches!(result, ValidationResult::Invalid(_)));
@@ -748,14 +750,14 @@ mod tests {
         let mut store = crate::blockstore::MemoryBlockStore::new();
         let b1 = create_half_block(
             &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({"tx": "original"}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({"tx": "original"}), Some(1000),
         );
         store.add_block(&b1).unwrap();
 
         // Double-sign fraud.
         let b1_fraud = create_half_block(
             &id, 1, &"b".repeat(64), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({"tx": "fraud"}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({"tx": "fraud"}), Some(1000),
         );
         let result = validate_and_record(&b1_fraud, &mut store);
         assert!(matches!(result, ValidationResult::Invalid(_)));
@@ -778,12 +780,42 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({"nested": {"key": "val"}}),
-            Some(1000.0),
+            Some(1000),
         );
 
         let json = serde_json::to_string(&block).unwrap();
         let parsed: HalfBlock = serde_json::from_str(&json).unwrap();
         assert_eq!(block, parsed);
         assert!(verify_block(&parsed).unwrap());
+    }
+
+    /// Verify that a block with a u64 timestamp survives multiple
+    /// JSON round-trips with its hash intact. u64 integers have no
+    /// precision issues in JSON (unlike f64).
+    #[test]
+    fn test_block_hash_stable_across_multiple_roundtrips() {
+        let id = test_identity();
+        let mut block = create_half_block(
+            &id,
+            1,
+            &"b".repeat(64),
+            0,
+            GENESIS_HASH,
+            BlockType::Proposal,
+            serde_json::json!({"proxy": true, "method": "GET", "path": "/task"}),
+            None, // real timestamp
+        );
+
+        // Round-trip 10 times — hash must remain stable.
+        for i in 0..10 {
+            let json = serde_json::to_string(&block).unwrap();
+            let parsed: HalfBlock = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                block.block_hash, parsed.compute_hash(),
+                "hash changed on round-trip {i}"
+            );
+            assert!(verify_block(&parsed).unwrap(), "verification failed on round-trip {i}");
+            block = parsed;
+        }
     }
 }

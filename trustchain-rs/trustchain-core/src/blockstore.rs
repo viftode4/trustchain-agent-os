@@ -21,6 +21,16 @@ pub struct DoubleSpend {
     pub block_b: HalfBlock,
 }
 
+/// A persisted peer record for loading/saving peer state across restarts.
+#[derive(Debug, Clone)]
+pub struct PersistentPeer {
+    pub pubkey: String,
+    pub address: String,
+    pub latest_seq: u64,
+    pub last_seen_unix_ms: u64,
+    pub is_bootstrap: bool,
+}
+
 /// Trait for block storage backends.
 pub trait BlockStore: Send {
     /// Store a block. Returns error on duplicate `(public_key, sequence_number)`.
@@ -57,6 +67,15 @@ pub trait BlockStore: Send {
 
     /// Get all recorded double-spends for a public key.
     fn get_double_spends(&self, pubkey: &str) -> Result<Vec<DoubleSpend>>;
+
+    /// Save or update a peer record.
+    fn save_peer(&mut self, peer: &PersistentPeer) -> Result<()>;
+
+    /// Load all persisted peer records.
+    fn load_peers(&self) -> Result<Vec<PersistentPeer>>;
+
+    /// Remove a peer record by public key.
+    fn remove_stale_peer(&mut self, pubkey: &str) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +87,7 @@ pub trait BlockStore: Send {
 pub struct MemoryBlockStore {
     blocks: HashMap<(String, u64), HalfBlock>,
     double_spends: Vec<DoubleSpend>,
+    peers: HashMap<String, PersistentPeer>,
 }
 
 impl MemoryBlockStore {
@@ -179,6 +199,20 @@ impl BlockStore for MemoryBlockStore {
             .cloned()
             .collect())
     }
+
+    fn save_peer(&mut self, peer: &PersistentPeer) -> Result<()> {
+        self.peers.insert(peer.pubkey.clone(), peer.clone());
+        Ok(())
+    }
+
+    fn load_peers(&self) -> Result<Vec<PersistentPeer>> {
+        Ok(self.peers.values().cloned().collect())
+    }
+
+    fn remove_stale_peer(&mut self, pubkey: &str) -> Result<()> {
+        self.peers.remove(pubkey);
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +249,8 @@ impl SqliteBlockStore {
 
     fn init_schema(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        // Enable WAL mode for concurrent readers (needed for dual-store in consensus).
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS blocks (
                 public_key TEXT NOT NULL,
@@ -226,7 +262,7 @@ impl SqliteBlockStore {
                 block_type TEXT NOT NULL,
                 tx_data TEXT NOT NULL,
                 block_hash TEXT NOT NULL,
-                timestamp REAL NOT NULL,
+                timestamp INTEGER NOT NULL,
                 insert_time REAL NOT NULL,
                 PRIMARY KEY (public_key, sequence_number)
             );
@@ -243,7 +279,15 @@ impl SqliteBlockStore {
                 block_data_b TEXT NOT NULL,
                 detected_at REAL NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_ds_pubkey ON double_spends(public_key);",
+            CREATE INDEX IF NOT EXISTS idx_ds_pubkey ON double_spends(public_key);
+
+            CREATE TABLE IF NOT EXISTS peers (
+                pubkey TEXT PRIMARY KEY,
+                address TEXT NOT NULL,
+                latest_seq INTEGER NOT NULL DEFAULT 0,
+                last_seen_unix_ms INTEGER NOT NULL,
+                is_bootstrap INTEGER NOT NULL DEFAULT 0
+            );",
         )?;
         Ok(())
     }
@@ -469,6 +513,49 @@ impl BlockStore for SqliteBlockStore {
         }
         Ok(result)
     }
+
+    fn save_peer(&mut self, peer: &PersistentPeer) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO peers (pubkey, address, latest_seq, last_seen_unix_ms, is_bootstrap)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                peer.pubkey,
+                peer.address,
+                peer.latest_seq,
+                peer.last_seen_unix_ms,
+                peer.is_bootstrap as i32,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_peers(&self) -> Result<Vec<PersistentPeer>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, address, latest_seq, last_seen_unix_ms, is_bootstrap FROM peers",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PersistentPeer {
+                pubkey: row.get(0)?,
+                address: row.get(1)?,
+                latest_seq: row.get(2)?,
+                last_seen_unix_ms: row.get(3)?,
+                is_bootstrap: row.get::<_, i32>(4)? != 0,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| TrustChainError::Storage(e.to_string()))?);
+        }
+        Ok(result)
+    }
+
+    fn remove_stale_peer(&mut self, pubkey: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM peers WHERE pubkey = ?1", params![pubkey])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -496,7 +583,7 @@ mod tests {
             prev_hash,
             BlockType::Proposal,
             serde_json::json!({"service": "test"}),
-            Some(1000.0 + seq as f64),
+            Some(1000 + seq),
         )
     }
 
@@ -571,7 +658,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Proposal,
             serde_json::json!({"service": "compute"}),
-            Some(1000.0),
+            Some(1000),
         );
         store.add_block(&proposal).unwrap();
 
@@ -584,7 +671,7 @@ mod tests {
             GENESIS_HASH,
             BlockType::Agreement,
             serde_json::json!({"service": "compute"}),
-            Some(1001.0),
+            Some(1001),
         );
         store.add_block(&agreement).unwrap();
 
@@ -643,5 +730,76 @@ mod tests {
             assert_eq!(block.sequence_number, 1);
             assert_eq!(store.get_block_count().unwrap(), 1);
         }
+    }
+
+    #[test]
+    fn test_peer_persistence_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("peers.db");
+
+        // Save peers.
+        {
+            let mut store = SqliteBlockStore::open(&db_path).unwrap();
+            store.save_peer(&PersistentPeer {
+                pubkey: "aaa".to_string(),
+                address: "http://127.0.0.1:8202".to_string(),
+                latest_seq: 5,
+                last_seen_unix_ms: 1700000000000,
+                is_bootstrap: true,
+            }).unwrap();
+            store.save_peer(&PersistentPeer {
+                pubkey: "bbb".to_string(),
+                address: "http://127.0.0.1:8212".to_string(),
+                latest_seq: 3,
+                last_seen_unix_ms: 1700000001000,
+                is_bootstrap: false,
+            }).unwrap();
+        }
+
+        // Reopen and load.
+        {
+            let store = SqliteBlockStore::open(&db_path).unwrap();
+            let peers = store.load_peers().unwrap();
+            assert_eq!(peers.len(), 2);
+            let aaa = peers.iter().find(|p| p.pubkey == "aaa").unwrap();
+            assert_eq!(aaa.address, "http://127.0.0.1:8202");
+            assert_eq!(aaa.latest_seq, 5);
+            assert!(aaa.is_bootstrap);
+        }
+    }
+
+    #[test]
+    fn test_peer_persistence_memory() {
+        let mut store = MemoryBlockStore::new();
+        store.save_peer(&PersistentPeer {
+            pubkey: "aaa".to_string(),
+            address: "addr1".to_string(),
+            latest_seq: 1,
+            last_seen_unix_ms: 1000,
+            is_bootstrap: false,
+        }).unwrap();
+
+        let peers = store.load_peers().unwrap();
+        assert_eq!(peers.len(), 1);
+
+        store.remove_stale_peer("aaa").unwrap();
+        let peers = store.load_peers().unwrap();
+        assert_eq!(peers.len(), 0);
+    }
+
+    #[test]
+    fn test_peer_remove_sqlite() {
+        let mut store = SqliteBlockStore::in_memory().unwrap();
+        store.save_peer(&PersistentPeer {
+            pubkey: "aaa".to_string(),
+            address: "addr1".to_string(),
+            latest_seq: 1,
+            last_seen_unix_ms: 1000,
+            is_bootstrap: false,
+        }).unwrap();
+
+        assert_eq!(store.load_peers().unwrap().len(), 1);
+        store.remove_stale_peer("aaa").unwrap();
+        assert_eq!(store.load_peers().unwrap().len(), 0);
     }
 }

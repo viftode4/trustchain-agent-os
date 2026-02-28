@@ -132,7 +132,7 @@ mod tests {
             alice_prev,
             BlockType::Proposal,
             serde_json::json!({"service": service}),
-            Some(1000.0),
+            Some(1000),
         );
         store.add_block(&proposal).unwrap();
 
@@ -144,7 +144,7 @@ mod tests {
             bob_prev,
             BlockType::Agreement,
             serde_json::json!({"service": service}),
-            Some(1001.0),
+            Some(1001),
         );
         store.add_block(&agreement).unwrap();
 
@@ -240,7 +240,7 @@ mod tests {
         let block = create_half_block(
             &alice, 1, &bob.pubkey_hex(), 0, GENESIS_HASH, BlockType::Proposal,
             serde_json::json!({"capability": "inference"}),
-            Some(1000.0),
+            Some(1000),
         );
 
         assert!(block_matches_capability(&block, "inference"));

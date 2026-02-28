@@ -138,6 +138,15 @@ pub struct BlocksResponse {
     pub blocks: Vec<HalfBlock>,
 }
 
+/// Request for registering a peer at runtime.
+#[derive(Deserialize)]
+pub struct RegisterPeerRequest {
+    pub pubkey: String,
+    pub address: String,
+    #[serde(default)]
+    pub agent_endpoint: Option<String>,
+}
+
 /// Generic error response.
 #[derive(Serialize)]
 pub struct ErrorResponse {
@@ -170,7 +179,7 @@ pub fn build_router<S: BlockStore + Send + 'static>(state: AppState<S>) -> Route
         .route("/chain/{pubkey}", get(handle_get_chain::<S>))
         .route("/block/{pubkey}/{seq}", get(handle_get_block::<S>))
         .route("/crawl/{pubkey}", get(handle_crawl::<S>))
-        .route("/peers", get(handle_get_peers::<S>))
+        .route("/peers", get(handle_get_peers::<S>).post(handle_register_peer::<S>))
         .route("/trust/{pubkey}", get(handle_trust_score::<S>))
         .route("/discover", get(handle_discover::<S>))
         .with_state(state)
@@ -418,6 +427,21 @@ async fn handle_get_peers<S: BlockStore + 'static>(
         })
         .collect();
     Json(response)
+}
+
+/// Register a peer at runtime (for bidirectional discovery).
+async fn handle_register_peer<S: BlockStore + 'static>(
+    State(state): State<AppState<S>>,
+    Json(req): Json<RegisterPeerRequest>,
+) -> Json<serde_json::Value> {
+    state
+        .discovery
+        .add_peer(req.pubkey.clone(), req.address, 0)
+        .await;
+    if let Some(ep) = req.agent_endpoint {
+        state.discovery.add_alias(ep, req.pubkey).await;
+    }
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 /// Query the trust score for a given public key.
@@ -704,6 +728,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_register_peer_endpoint() {
+        let state = make_test_state();
+        let app = build_router(state.clone());
+
+        let body = serde_json::json!({
+            "pubkey": "deadbeef",
+            "address": "http://127.0.0.1:8212",
+            "agent_endpoint": "http://localhost:9002",
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/peers")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify peer was registered.
+        let peer = state.discovery.get_peer("deadbeef").await;
+        assert!(peer.is_some());
+
+        // Verify alias was registered.
+        let by_alias = state.discovery.get_peer_by_address("localhost:9002").await;
+        assert!(by_alias.is_some());
+        assert_eq!(by_alias.unwrap().pubkey, "deadbeef");
+    }
+
+    #[tokio::test]
     async fn test_receive_proposal_endpoint() {
         let state = make_test_state();
 
@@ -718,7 +773,7 @@ mod tests {
             trustchain_core::GENESIS_HASH,
             trustchain_core::BlockType::Proposal,
             serde_json::json!({"service": "test"}),
-            Some(1000.0),
+            Some(1000),
         );
 
         let app = build_router(state);

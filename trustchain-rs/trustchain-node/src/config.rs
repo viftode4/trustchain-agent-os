@@ -32,12 +32,25 @@ pub struct NodeConfig {
     pub db_path: PathBuf,
 
     /// Bootstrap node addresses for peer discovery.
+    /// Falls back to built-in seed nodes when empty.
     #[serde(default)]
     pub bootstrap_nodes: Vec<String>,
 
     /// Minimum signers for CHECO consensus checkpoints.
     #[serde(default = "default_min_signers")]
     pub min_signers: usize,
+
+    /// Maximum new QUIC connections per IP per second (rate limiting).
+    #[serde(default = "default_max_connections_per_ip_per_sec")]
+    pub max_connections_per_ip_per_sec: u32,
+
+    /// Interval between CHECO consensus checkpoint rounds (seconds).
+    #[serde(default = "default_checkpoint_interval_secs")]
+    pub checkpoint_interval_secs: u64,
+
+    /// STUN server for NAT traversal (None to disable).
+    #[serde(default = "default_stun_server")]
+    pub stun_server: Option<String>,
 
     /// Log level.
     #[serde(default = "default_log_level")]
@@ -50,6 +63,14 @@ pub struct NodeConfig {
     /// Agent's own HTTP endpoint (set by sidecar mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_endpoint: Option<String>,
+
+    /// Public HTTP address to advertise to peers.
+    /// Required when running on a public server so peers can reach you.
+    /// Example: "http://203.0.113.5:8202"
+    /// If not set, STUN is used to discover the public IP. Falls back to
+    /// 127.0.0.1 (only suitable for single-machine testing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_addr: Option<String>,
 }
 
 impl Default for NodeConfig {
@@ -63,9 +84,13 @@ impl Default for NodeConfig {
             db_path: default_db_path(),
             bootstrap_nodes: vec![],
             min_signers: default_min_signers(),
+            max_connections_per_ip_per_sec: default_max_connections_per_ip_per_sec(),
+            checkpoint_interval_secs: default_checkpoint_interval_secs(),
+            stun_server: default_stun_server(),
             log_level: default_log_level(),
             agent_name: None,
             agent_endpoint: None,
+            advertise_addr: None,
         }
     }
 }
@@ -81,6 +106,15 @@ impl NodeConfig {
     /// Generate a default config file as a string.
     pub fn default_toml() -> String {
         toml::to_string_pretty(&Self::default()).unwrap()
+    }
+
+    /// Get effective bootstrap nodes (user-configured or built-in defaults).
+    pub fn effective_bootstrap_nodes(&self) -> Vec<String> {
+        if self.bootstrap_nodes.is_empty() {
+            default_seed_nodes()
+        } else {
+            self.bootstrap_nodes.clone()
+        }
     }
 }
 
@@ -112,6 +146,29 @@ fn default_min_signers() -> usize {
     1
 }
 
+fn default_max_connections_per_ip_per_sec() -> u32 {
+    20
+}
+
+fn default_checkpoint_interval_secs() -> u64 {
+    60
+}
+
+fn default_stun_server() -> Option<String> {
+    Some("stun.l.google.com:19302".to_string())
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
+
+/// Built-in seed nodes for initial network bootstrap.
+/// Used when `bootstrap_nodes` config is empty.
+pub fn default_seed_nodes() -> Vec<String> {
+    vec![
+        // Placeholder — replace with real seed nodes when deployed.
+        // "http://seed1.trustchain.network:8202".to_string(),
+        // "http://seed2.trustchain.network:8202".to_string(),
+    ]
+}
+

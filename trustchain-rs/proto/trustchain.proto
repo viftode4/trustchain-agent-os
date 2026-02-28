@@ -13,7 +13,7 @@ message HalfBlockProto {
   string block_type = 7;
   string transaction = 8;  // JSON-encoded transaction payload
   string block_hash = 9;
-  double timestamp = 10;
+  uint64 timestamp = 10;
 }
 
 // Peer information for discovery.

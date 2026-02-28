@@ -240,7 +240,7 @@ mod tests {
             alice_prev,
             BlockType::Proposal,
             serde_json::json!({"service": "compute"}),
-            Some(1000.0),
+            Some(1000),
         );
         store.add_block(&proposal).unwrap();
 
@@ -252,7 +252,7 @@ mod tests {
             bob_prev,
             BlockType::Agreement,
             serde_json::json!({"service": "compute"}),
-            Some(1001.0),
+            Some(1001),
         );
         store.add_block(&agreement).unwrap();
 

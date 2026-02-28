@@ -58,7 +58,14 @@ impl<'a, S: BlockStore> TrustEngine<'a, S> {
     /// Score = `w_integrity * integrity + w_netflow * netflow + w_statistical * statistical`
     ///
     /// If netflow is unavailable (no seed nodes), its weight is redistributed.
+    /// Returns hard zero for agents with proven double-spend fraud.
     pub fn compute_trust(&self, pubkey: &str) -> Result<f64> {
+        // Hard zero for proven fraud.
+        let frauds = self.store.get_double_spends(pubkey)?;
+        if !frauds.is_empty() {
+            return Ok(0.0);
+        }
+
         let integrity = self.compute_chain_integrity(pubkey)?;
         let statistical = self.compute_statistical_score(pubkey)?;
 
@@ -196,11 +203,11 @@ impl<'a, S: BlockStore> TrustEngine<'a, S> {
             }
         };
 
-        // Feature 4: account age (saturates at 60 seconds).
-        let first_ts = chain.first().map(|b| b.timestamp).unwrap_or(0.0);
-        let last_ts = chain.last().map(|b| b.timestamp).unwrap_or(0.0);
-        let age = (last_ts - first_ts).max(0.0);
-        let age_score = (age / 60.0).min(1.0);
+        // Feature 4: account age (saturates at 60 seconds = 60_000 ms).
+        let first_ts = chain.first().map(|b| b.timestamp).unwrap_or(0) as f64;
+        let last_ts = chain.last().map(|b| b.timestamp).unwrap_or(0) as f64;
+        let age_ms = (last_ts - first_ts).max(0.0);
+        let age_score = (age_ms / 60_000.0).min(1.0);
 
         // Feature 5: Shannon entropy of counterparty distribution.
         let entropy_score = if counterparties.len() <= 1 {
@@ -253,7 +260,7 @@ mod tests {
         bob_seq: u64,
         alice_prev: &str,
         bob_prev: &str,
-        ts: f64,
+        ts: u64,
     ) -> (String, String) {
         let proposal = create_half_block(
             alice, alice_seq, &bob.pubkey_hex(), 0,
@@ -265,7 +272,7 @@ mod tests {
         let agreement = create_half_block(
             bob, bob_seq, &alice.pubkey_hex(), alice_seq,
             bob_prev, BlockType::Agreement,
-            serde_json::json!({"service": "test"}), Some(ts + 1.0),
+            serde_json::json!({"service": "test"}), Some(ts + 1),
         );
         store.add_block(&agreement).unwrap();
 
@@ -288,7 +295,7 @@ mod tests {
         let agent = Identity::from_bytes(&[2u8; 32]);
 
         create_interaction(
-            &mut store, &seed, &agent, 1, 1, GENESIS_HASH, GENESIS_HASH, 1000.0,
+            &mut store, &seed, &agent, 1, 1, GENESIS_HASH, GENESIS_HASH, 1000,
         );
 
         let engine = TrustEngine::new(
@@ -309,7 +316,7 @@ mod tests {
         let agent = Identity::from_bytes(&[2u8; 32]);
 
         create_interaction(
-            &mut store, &seed, &agent, 1, 1, GENESIS_HASH, GENESIS_HASH, 1000.0,
+            &mut store, &seed, &agent, 1, 1, GENESIS_HASH, GENESIS_HASH, 1000,
         );
 
         let engine = TrustEngine::new(
@@ -334,7 +341,7 @@ mod tests {
             let proposal = create_half_block(
                 &agent, (i - 1) as u64, &peer.pubkey_hex(), 0,
                 &prev, BlockType::Proposal,
-                serde_json::json!({"service": "test"}), Some(1000.0 + i as f64 * 10.0),
+                serde_json::json!({"service": "test"}), Some(1000 + i as u64 * 10),
             );
             prev = proposal.block_hash.clone();
             store.add_block(&proposal).unwrap();
@@ -352,7 +359,7 @@ mod tests {
         let peer = Identity::from_bytes(&[2u8; 32]);
 
         create_interaction(
-            &mut store, &agent, &peer, 1, 1, GENESIS_HASH, GENESIS_HASH, 1000.0,
+            &mut store, &agent, &peer, 1, 1, GENESIS_HASH, GENESIS_HASH, 1000,
         );
 
         // No seed nodes → netflow weight redistributed.
@@ -362,13 +369,48 @@ mod tests {
     }
 
     #[test]
+    fn test_fraud_trust_penalty() {
+        let mut store = MemoryBlockStore::new();
+        let agent = Identity::from_bytes(&[1u8; 32]);
+        let peer = Identity::from_bytes(&[2u8; 32]);
+
+        // Give the agent a good history first.
+        create_interaction(
+            &mut store, &agent, &peer, 1, 1, GENESIS_HASH, GENESIS_HASH, 1000,
+        );
+
+        // Without fraud, trust should be positive.
+        let engine = TrustEngine::new(&store, None, None);
+        let score_before = engine.compute_trust(&agent.pubkey_hex()).unwrap();
+        assert!(score_before > 0.0, "should have positive trust before fraud");
+
+        // Record a double-spend fraud.
+        let fake_a = create_half_block(
+            &agent, 2, &peer.pubkey_hex(), 0,
+            GENESIS_HASH, BlockType::Proposal,
+            serde_json::json!({"version": "a"}), Some(2000),
+        );
+        let fake_b = create_half_block(
+            &agent, 2, &peer.pubkey_hex(), 0,
+            GENESIS_HASH, BlockType::Proposal,
+            serde_json::json!({"version": "b"}), Some(2001),
+        );
+        store.add_double_spend(&fake_a, &fake_b).unwrap();
+
+        // After fraud, trust should be hard zero.
+        let engine = TrustEngine::new(&store, None, None);
+        let score_after = engine.compute_trust(&agent.pubkey_hex()).unwrap();
+        assert_eq!(score_after, 0.0, "trust should be 0.0 after fraud");
+    }
+
+    #[test]
     fn test_chain_integrity_perfect() {
         let mut store = MemoryBlockStore::new();
         let agent = Identity::from_bytes(&[1u8; 32]);
         let peer = Identity::from_bytes(&[2u8; 32]);
 
         create_interaction(
-            &mut store, &agent, &peer, 1, 1, GENESIS_HASH, GENESIS_HASH, 1000.0,
+            &mut store, &agent, &peer, 1, 1, GENESIS_HASH, GENESIS_HASH, 1000,
         );
 
         let engine = TrustEngine::new(&store, None, None);

@@ -247,14 +247,14 @@ mod tests {
         let proposal = create_half_block(
             alice, alice_seq, &bob.pubkey_hex(), 0,
             alice_prev, BlockType::Proposal,
-            serde_json::json!({"service": "test"}), Some(1000.0),
+            serde_json::json!({"service": "test"}), Some(1000),
         );
         store.add_block(&proposal).unwrap();
 
         let agreement = create_half_block(
             bob, bob_seq, &alice.pubkey_hex(), alice_seq,
             bob_prev, BlockType::Agreement,
-            serde_json::json!({"service": "test"}), Some(1001.0),
+            serde_json::json!({"service": "test"}), Some(1001),
         );
         store.add_block(&agreement).unwrap();
 
@@ -302,7 +302,7 @@ mod tests {
         // Only add the proposal, no agreement.
         let proposal = create_half_block(
             &alice, 1, &bob.pubkey_hex(), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1000),
         );
         store.add_block(&proposal).unwrap();
 
@@ -336,7 +336,7 @@ mod tests {
 
         let proposal = create_half_block(
             &alice, 1, &bob.pubkey_hex(), 0, GENESIS_HASH,
-            BlockType::Proposal, serde_json::json!({}), Some(1000.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1000),
         );
         store.add_block(&proposal).unwrap();
 
@@ -385,7 +385,7 @@ mod tests {
         // One orphan proposal.
         let proposal = create_half_block(
             &alice, 2, &charlie.pubkey_hex(), 0, &a_hash,
-            BlockType::Proposal, serde_json::json!({}), Some(1002.0),
+            BlockType::Proposal, serde_json::json!({}), Some(1002),
         );
         store.add_block(&proposal).unwrap();
 

@@ -8,16 +8,17 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
 use trustchain_core::{
-    BlockStore, HalfBlock, Identity, SqliteBlockStore, TrustChainProtocol,
-    validate_block_invariants, ValidationResult,
+    BlockStore, CHECOConsensus, HalfBlock, Identity, PersistentPeer, SqliteBlockStore,
+    TrustChainProtocol, validate_block_invariants, verify_block, ValidationResult,
 };
 use trustchain_transport::{
     AppState, ConnectionPool, PeerDiscovery, ProxyState, QuicTransport,
     discover,
     start_grpc_server, start_http_server, start_proxy_server,
     message::{
-        BlockPairBroadcastPayload, MessageType, TransportMessage,
-        block_to_bytes, bytes_to_block,
+        BlockPairBroadcastPayload, CheckpointFinalizedPayload, CheckpointProposalPayload,
+        CheckpointVotePayload, CheckpointWire, FraudProofPayload, MessageType,
+        TransportMessage, block_to_bytes, bytes_to_block,
     },
 };
 
@@ -72,6 +73,7 @@ pub struct Node {
     pub discovery: Arc<PeerDiscovery>,
     pub pool: Arc<ConnectionPool>,
     pub broadcast_tracker: Arc<Mutex<BroadcastTracker>>,
+    pub consensus: Arc<Mutex<CHECOConsensus<SqliteBlockStore>>>,
 }
 
 impl Node {
@@ -81,9 +83,20 @@ impl Node {
         let store = SqliteBlockStore::open(db_path)
             .expect("failed to open SQLite database");
         let protocol = TrustChainProtocol::new(identity.clone(), store);
+
+        // Second store handle to the same DB file (WAL mode enables concurrent readers).
+        let consensus_store = SqliteBlockStore::open(db_path)
+            .expect("failed to open SQLite database for consensus");
+        let consensus = CHECOConsensus::new(
+            identity.clone(),
+            consensus_store,
+            None,
+            config.min_signers,
+        );
+
         let discovery = PeerDiscovery::new(
             identity.pubkey_hex(),
-            config.bootstrap_nodes.clone(),
+            config.effective_bootstrap_nodes(),
         );
         let pool = ConnectionPool::default();
 
@@ -94,6 +107,7 @@ impl Node {
             discovery: Arc::new(discovery),
             pool: Arc::new(pool),
             broadcast_tracker: Arc::new(Mutex::new(BroadcastTracker::new())),
+            consensus: Arc::new(Mutex::new(consensus)),
         }
     }
 
@@ -107,11 +121,37 @@ impl Node {
 
         // Start QUIC transport.
         let quic_addr: SocketAddr = self.config.quic_addr.parse()?;
-        let quic = QuicTransport::bind(quic_addr, &pubkey).await
-            .map_err(|e| anyhow::anyhow!("QUIC bind failed: {e}"))?;
+        let quic = QuicTransport::bind_with_rate_limit(
+            quic_addr, &pubkey, self.config.max_connections_per_ip_per_sec,
+        ).await.map_err(|e| anyhow::anyhow!("QUIC bind failed: {e}"))?;
         let quic_local = quic.local_addr()
             .map_err(|e| anyhow::anyhow!("QUIC local addr: {e}"))?;
         tracing::info!(%quic_local, "QUIC transport ready");
+
+        // Compute the HTTP address we will advertise to other peers.
+        // Priority: explicit advertise_addr > STUN-derived > loopback fallback.
+        let http_port: u16 = self.config.http_addr.parse::<SocketAddr>()
+            .map(|a| a.port())
+            .unwrap_or(8202);
+        let mut our_http_addr: String = self.config.advertise_addr.clone()
+            .unwrap_or_else(|| format!("http://127.0.0.1:{http_port}"));
+
+        // Discover public address via STUN (for NAT traversal).
+        if let Some(ref stun_server) = self.config.stun_server {
+            match trustchain_transport::stun::discover_public_addr(stun_server).await {
+                Ok(public_addr) => {
+                    tracing::info!(%public_addr, "discovered public QUIC address via STUN");
+                    // If no explicit advertise_addr, derive our public HTTP address from STUN.
+                    if self.config.advertise_addr.is_none() {
+                        our_http_addr = format!("http://{}:{http_port}", public_addr.ip());
+                        tracing::info!(our_http_addr, "using STUN-derived advertise address");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(err = %e, "STUN discovery failed (set advertise_addr in config for public nodes)");
+                }
+            }
+        }
 
         // Start QUIC accept loop with message routing.
         let (quic_tx, quic_rx) = mpsc::channel::<(Vec<u8>, mpsc::Sender<Vec<u8>>)>(256);
@@ -168,6 +208,7 @@ impl Node {
             discovery: self.discovery.clone(),
             quic: quic_accept_handle.1.clone(),
             client: reqwest::Client::new(),
+            peer_locks: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         };
         let proxy_handle = tokio::spawn(async move {
             if let Err(e) = start_proxy_server(proxy_addr, proxy_state).await {
@@ -179,11 +220,26 @@ impl Node {
         // Start peer discovery bootstrap + gossip.
         let disc = self.discovery.clone();
         let disc_protocol = self.protocol.clone();
-        let bootstrap_nodes = self.config.bootstrap_nodes.clone();
+        let bootstrap_nodes = self.config.effective_bootstrap_nodes();
         let discovery_handle = tokio::spawn(async move {
             Self::discovery_loop(disc, disc_protocol, bootstrap_nodes).await;
         });
         tracing::info!("peer discovery started");
+
+        // Start CHECO consensus checkpoint loop.
+        let checkpoint_consensus = self.consensus.clone();
+        let checkpoint_discovery = self.discovery.clone();
+        let checkpoint_quic = quic_accept_handle.1.clone();
+        let checkpoint_interval = self.config.checkpoint_interval_secs;
+        let checkpoint_handle = tokio::spawn(async move {
+            Self::checkpoint_loop(
+                checkpoint_consensus,
+                checkpoint_discovery,
+                checkpoint_quic,
+                checkpoint_interval,
+            ).await;
+        });
+        tracing::info!(interval_secs = checkpoint_interval, "CHECO checkpoint loop started");
 
         // Start connection pool cleanup task.
         let pool = self.pool.clone();
@@ -195,7 +251,6 @@ impl Node {
         });
 
         // Register ourselves in the discovery layer so peers can find us.
-        let our_http_addr = format!("http://127.0.0.1:{}", http_addr.port());
         self.discovery.add_peer(
             pubkey.clone(),
             our_http_addr,
@@ -204,6 +259,23 @@ impl Node {
                 proto.store().get_latest_seq(&pubkey).unwrap_or(0)
             },
         ).await;
+
+        // Load persisted peers from previous sessions.
+        {
+            let proto = self.protocol.lock().await;
+            match proto.store().load_peers() {
+                Ok(peers) => {
+                    let count = peers.len();
+                    for p in peers {
+                        self.discovery.add_peer(p.pubkey, p.address, p.latest_seq).await;
+                    }
+                    if count > 0 {
+                        tracing::info!(count, "loaded persisted peers");
+                    }
+                }
+                Err(e) => tracing::warn!("failed to load persisted peers: {e}"),
+            }
+        }
 
         // Register agent endpoint alias so the proxy can resolve it.
         if let Some(ref endpoint) = self.config.agent_endpoint {
@@ -232,16 +304,21 @@ impl Node {
             "node fully started"
         );
 
-        // Wait for any service to exit.
+        // Wait for any service to exit, or graceful shutdown signal.
         tokio::select! {
             _ = grpc_handle => tracing::warn!("gRPC server exited"),
             _ = http_handle => tracing::warn!("HTTP server exited"),
             _ = proxy_handle => tracing::warn!("proxy server exited"),
             _ = quic_accept_handle.0 => tracing::warn!("QUIC accept loop exited"),
             _ = discovery_handle => tracing::warn!("discovery loop exited"),
+            _ = checkpoint_handle => tracing::warn!("checkpoint loop exited"),
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("received shutdown signal, shutting down gracefully...");
+            }
         }
 
         quic_accept_handle.1.shutdown();
+        tracing::info!("node shut down");
         Ok(())
     }
 
@@ -280,9 +357,7 @@ impl Node {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("invalid QUIC message: {e}");
-                return serde_json::to_vec(&serde_json::json!({
-                    "error": format!("invalid message: {e}")
-                })).unwrap_or_default();
+                return Self::error_response(&format!("invalid message: {e}"));
             }
         };
 
@@ -296,26 +371,36 @@ impl Node {
                     }
                 };
 
-                let mut proto = protocol.lock().await;
+                let sender_pubkey = proposal.public_key.clone();
+                let response = {
+                    let mut proto = protocol.lock().await;
 
-                // Receive and validate.
-                if let Err(e) = proto.receive_proposal(&proposal) {
-                    return Self::error_response(&format!("proposal rejected: {e}"));
-                }
-
-                // Create agreement.
-                match proto.create_agreement(&proposal, None) {
-                    Ok(agreement) => {
-                        let resp = TransportMessage::new(
-                            MessageType::Agreement,
-                            proto.pubkey(),
-                            block_to_bytes(&agreement),
-                            msg.request_id,
-                        );
-                        serde_json::to_vec(&resp).unwrap_or_default()
+                    // Receive and validate.
+                    if let Err(e) = proto.receive_proposal(&proposal) {
+                        return Self::error_response(&format!("proposal rejected: {e}"));
                     }
-                    Err(e) => Self::error_response(&format!("agreement failed: {e}")),
-                }
+
+                    // Create agreement.
+                    match proto.create_agreement(&proposal, None) {
+                        Ok(agreement) => {
+                            let resp = TransportMessage::new(
+                                MessageType::Agreement,
+                                proto.pubkey(),
+                                block_to_bytes(&agreement),
+                                msg.request_id,
+                            );
+                            serde_json::to_vec(&resp).unwrap_or_default()
+                        }
+                        Err(e) => Self::error_response(&format!("agreement failed: {e}")),
+                    }
+                };
+
+                // After lock released, check for fraud and broadcast if found.
+                Self::check_and_broadcast_fraud(
+                    &sender_pubkey, protocol, discovery, quic, tracker,
+                ).await;
+
+                response
             }
 
             MessageType::Agreement => {
@@ -327,14 +412,24 @@ impl Node {
                     }
                 };
 
-                let mut proto = protocol.lock().await;
-                match proto.receive_agreement(&agreement) {
-                    Ok(_) => {
-                        serde_json::to_vec(&serde_json::json!({"accepted": true}))
-                            .unwrap_or_default()
+                let sender_pubkey = agreement.public_key.clone();
+                let response = {
+                    let mut proto = protocol.lock().await;
+                    match proto.receive_agreement(&agreement) {
+                        Ok(_) => {
+                            serde_json::to_vec(&serde_json::json!({"accepted": true}))
+                                .unwrap_or_default()
+                        }
+                        Err(e) => Self::error_response(&format!("agreement rejected: {e}")),
                     }
-                    Err(e) => Self::error_response(&format!("agreement rejected: {e}")),
-                }
+                };
+
+                // After lock released, check for fraud and broadcast if found.
+                Self::check_and_broadcast_fraud(
+                    &sender_pubkey, protocol, discovery, quic, tracker,
+                ).await;
+
+                response
             }
 
             MessageType::CrawlRequest => {
@@ -510,6 +605,72 @@ impl Node {
                 serde_json::to_vec(&resp).unwrap_or_default()
             }
 
+            MessageType::FraudProof => {
+                let payload: FraudProofPayload = match serde_json::from_slice(&msg.payload) {
+                    Ok(p) => p,
+                    Err(e) => return Self::error_response(&format!("invalid fraud proof: {e}")),
+                };
+
+                // Dedup via broadcast tracker.
+                let dedup_key = format!(
+                    "fraud:{}:{}",
+                    payload.block_a.block_hash, payload.block_b.block_hash
+                );
+                {
+                    let mut t = tracker.lock().await;
+                    if !t.mark_if_new(&dedup_key) {
+                        return serde_json::to_vec(&serde_json::json!({"status": "already_seen"}))
+                            .unwrap_or_default();
+                    }
+                }
+
+                // Validate: both blocks must have valid signatures and same (pubkey, seq) but different hashes.
+                let valid_a = trustchain_core::verify_block(&payload.block_a).unwrap_or(false);
+                let valid_b = trustchain_core::verify_block(&payload.block_b).unwrap_or(false);
+                if !valid_a || !valid_b {
+                    return Self::error_response("fraud proof contains invalid block signatures");
+                }
+                if payload.block_a.public_key != payload.block_b.public_key
+                    || payload.block_a.sequence_number != payload.block_b.sequence_number
+                {
+                    return Self::error_response("fraud proof blocks not at same (pubkey, seq)");
+                }
+                if payload.block_a.block_hash == payload.block_b.block_hash {
+                    return Self::error_response("fraud proof blocks are identical");
+                }
+
+                // Store the double-spend.
+                {
+                    let mut proto = protocol.lock().await;
+                    let _ = proto.store_mut().add_double_spend(&payload.block_a, &payload.block_b);
+                }
+
+                tracing::warn!(
+                    pubkey = &payload.block_a.public_key[..8],
+                    seq = payload.block_a.sequence_number,
+                    "received fraud proof — double-spend recorded"
+                );
+
+                // Relay with decremented TTL.
+                if payload.ttl > 1 {
+                    let relay_payload = FraudProofPayload {
+                        block_a: payload.block_a,
+                        block_b: payload.block_b,
+                        ttl: payload.ttl - 1,
+                    };
+                    let our_pubkey = {
+                        let proto = protocol.lock().await;
+                        proto.pubkey()
+                    };
+                    Self::broadcast_fraud_proof(
+                        &relay_payload, &our_pubkey, discovery, quic, tracker,
+                    ).await;
+                }
+
+                serde_json::to_vec(&serde_json::json!({"status": "fraud_recorded"}))
+                    .unwrap_or_default()
+            }
+
             MessageType::HalfBlockBroadcast => {
                 // Single half-block broadcast — validate and persist.
                 let payload: trustchain_transport::message::HalfBlockBroadcastPayload =
@@ -542,6 +703,65 @@ impl Node {
                     .unwrap_or_default()
             }
 
+            MessageType::CheckpointProposal => {
+                let payload: CheckpointProposalPayload = match serde_json::from_slice(&msg.payload) {
+                    Ok(p) => p,
+                    Err(e) => return Self::error_response(&format!("invalid checkpoint proposal: {e}")),
+                };
+
+                // Validate: must be a checkpoint block with valid signature.
+                if !payload.checkpoint_block.is_checkpoint() {
+                    return Self::error_response("not a checkpoint block");
+                }
+                if !verify_block(&payload.checkpoint_block).unwrap_or(false) {
+                    return Self::error_response("invalid checkpoint block signature");
+                }
+
+                // Sign the checkpoint block hash as our vote.
+                let proto = protocol.lock().await;
+                let voter_pubkey = proto.pubkey();
+                let signature_hex = proto.identity().sign_hex(
+                    payload.checkpoint_block.block_hash.as_bytes(),
+                );
+
+                let vote = CheckpointVotePayload {
+                    checkpoint_block_hash: payload.checkpoint_block.block_hash.clone(),
+                    voter_pubkey,
+                    signature_hex,
+                    round: payload.round,
+                };
+
+                let resp = TransportMessage::new(
+                    MessageType::CheckpointVote,
+                    proto.pubkey(),
+                    serde_json::to_vec(&vote).unwrap_or_default(),
+                    msg.request_id,
+                );
+                serde_json::to_vec(&resp).unwrap_or_default()
+            }
+
+            MessageType::CheckpointFinalized => {
+                let payload: CheckpointFinalizedPayload = match serde_json::from_slice(&msg.payload) {
+                    Ok(p) => p,
+                    Err(e) => return Self::error_response(&format!("invalid checkpoint finalized: {e}")),
+                };
+
+                // Validate the checkpoint block.
+                if !verify_block(&payload.checkpoint.checkpoint_block).unwrap_or(false) {
+                    return Self::error_response("invalid finalized checkpoint block");
+                }
+
+                tracing::info!(
+                    facilitator = &payload.checkpoint.facilitator_pubkey[..8],
+                    round = payload.round,
+                    signers = payload.checkpoint.signatures.len(),
+                    "received finalized checkpoint"
+                );
+
+                serde_json::to_vec(&serde_json::json!({"status": "checkpoint_accepted"}))
+                    .unwrap_or_default()
+            }
+
             _ => {
                 Self::error_response("unhandled message type")
             }
@@ -554,7 +774,7 @@ impl Node {
         our_pubkey: &str,
         discovery: &Arc<PeerDiscovery>,
         quic: &Arc<QuicTransport>,
-        tracker: &Arc<Mutex<BroadcastTracker>>,
+        _tracker: &Arc<Mutex<BroadcastTracker>>,
     ) {
         let peers = discovery.get_gossip_peers(BROADCAST_FANOUT).await;
         if peers.is_empty() {
@@ -595,7 +815,87 @@ impl Node {
         }
     }
 
+    /// Check for double-spends by a peer and broadcast fraud proof if found.
+    async fn check_and_broadcast_fraud(
+        sender_pubkey: &str,
+        protocol: &Arc<Mutex<TrustChainProtocol<SqliteBlockStore>>>,
+        discovery: &Arc<PeerDiscovery>,
+        quic: &Arc<QuicTransport>,
+        tracker: &Arc<Mutex<BroadcastTracker>>,
+    ) {
+        let fraud_data = {
+            let proto = protocol.lock().await;
+            proto.store().get_double_spends(sender_pubkey).ok()
+        };
+        if let Some(frauds) = fraud_data {
+            if let Some(ds) = frauds.first() {
+                let fraud_payload = FraudProofPayload {
+                    block_a: ds.block_a.clone(),
+                    block_b: ds.block_b.clone(),
+                    ttl: BROADCAST_TTL,
+                };
+                let our_pubkey = {
+                    let proto = protocol.lock().await;
+                    proto.pubkey()
+                };
+                let disc = discovery.clone();
+                let q = quic.clone();
+                let t = tracker.clone();
+                tokio::spawn(async move {
+                    Self::broadcast_fraud_proof(&fraud_payload, &our_pubkey, &disc, &q, &t).await;
+                });
+            }
+        }
+    }
+
+    /// Broadcast a fraud proof to random peers via QUIC.
+    async fn broadcast_fraud_proof(
+        payload: &FraudProofPayload,
+        our_pubkey: &str,
+        discovery: &Arc<PeerDiscovery>,
+        quic: &Arc<QuicTransport>,
+        _tracker: &Arc<Mutex<BroadcastTracker>>,
+    ) {
+        let peers = discovery.get_gossip_peers(BROADCAST_FANOUT).await;
+        if peers.is_empty() {
+            return;
+        }
+
+        let msg = TransportMessage::new(
+            MessageType::FraudProof,
+            our_pubkey.to_string(),
+            serde_json::to_vec(payload).unwrap_or_default(),
+            format!("fraud-{}", payload.block_a.block_hash.get(..8).unwrap_or("?")),
+        );
+        let msg_bytes = serde_json::to_vec(&msg).unwrap_or_default();
+
+        for peer in peers {
+            let quic_addr = match peer.address
+                .strip_prefix("http://")
+                .unwrap_or(&peer.address)
+                .parse::<SocketAddr>()
+            {
+                Ok(a) => SocketAddr::new(a.ip(), a.port().saturating_sub(2)),
+                Err(_) => continue,
+            };
+
+            let quic = quic.clone();
+            let msg_bytes = msg_bytes.clone();
+            tokio::spawn(async move {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    quic.send_message(quic_addr, &msg_bytes),
+                ).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::debug!("fraud broadcast send error: {e}"),
+                    Err(_) => tracing::debug!("fraud broadcast send timeout"),
+                }
+            });
+        }
+    }
+
     /// Broadcast a completed transaction (both halves) to the network.
+    #[allow(dead_code)]
     pub async fn broadcast_block_pair(
         proposal: &HalfBlock,
         agreement: &HalfBlock,
@@ -621,7 +921,13 @@ impl Node {
     }
 
     fn error_response(msg: &str) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({"error": msg})).unwrap_or_default()
+        let resp = TransportMessage::new(
+            MessageType::Error,
+            String::new(),
+            msg.as_bytes().to_vec(),
+            String::new(),
+        );
+        serde_json::to_vec(&resp).unwrap_or_default()
     }
 
     /// Peer discovery: bootstrap then periodic gossip.
@@ -674,7 +980,8 @@ impl Node {
                     }
                     Err(_) => {
                         // Stale peer — remove if not seen for 5 minutes.
-                        if peer.last_seen.elapsed() > Duration::from_secs(300) {
+                        let now = trustchain_transport::discovery::now_unix_ms();
+                        if now.saturating_sub(peer.last_seen_unix_ms) > 300_000 {
                             discovery.remove_peer(&peer.pubkey).await;
                         }
                     }
@@ -710,6 +1017,20 @@ impl Node {
                             );
                         }
                     }
+                }
+            }
+
+            // Persist current peer list for next restart.
+            {
+                let mut proto = protocol.lock().await;
+                for peer in &all_peers {
+                    let _ = proto.store_mut().save_peer(&PersistentPeer {
+                        pubkey: peer.pubkey.clone(),
+                        address: peer.address.clone(),
+                        latest_seq: peer.latest_seq,
+                        last_seen_unix_ms: peer.last_seen_unix_ms,
+                        is_bootstrap: peer.is_bootstrap,
+                    });
                 }
             }
         }
@@ -801,5 +1122,176 @@ impl Node {
             .unwrap_or_default();
 
         Ok(blocks)
+    }
+
+    /// CHECO consensus checkpoint loop.
+    ///
+    /// Periodically checks if we are the facilitator. If so, proposes a checkpoint,
+    /// collects votes from peers via QUIC, and finalizes when enough votes are collected.
+    async fn checkpoint_loop(
+        consensus: Arc<Mutex<CHECOConsensus<SqliteBlockStore>>>,
+        discovery: Arc<PeerDiscovery>,
+        quic: Arc<QuicTransport>,
+        interval_secs: u64,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        let mut round: u64 = 0;
+
+        loop {
+            interval.tick().await;
+            round += 1;
+
+            // Update known peers from discovery.
+            let peers = discovery.get_peers().await;
+            let peer_pubkeys: Vec<String> = peers.iter().map(|p| p.pubkey.clone()).collect();
+            {
+                let mut cons = consensus.lock().await;
+                cons.set_known_peers(peer_pubkeys);
+            }
+
+            // Check if we are the facilitator.
+            let is_facilitator = {
+                let cons = consensus.lock().await;
+                cons.is_facilitator().unwrap_or(false)
+            };
+
+            if !is_facilitator {
+                continue;
+            }
+
+            tracing::info!(round, "we are the checkpoint facilitator");
+
+            // Propose a checkpoint.
+            let checkpoint_block = {
+                let mut cons = consensus.lock().await;
+                match cons.propose_checkpoint() {
+                    Ok(block) => block,
+                    Err(e) => {
+                        tracing::warn!(round, err = %e, "failed to propose checkpoint");
+                        continue;
+                    }
+                }
+            };
+
+            // Send CheckpointProposal to all peers, collect votes.
+            let proposal_payload = CheckpointProposalPayload {
+                checkpoint_block: checkpoint_block.clone(),
+                round,
+            };
+            let our_pubkey = {
+                let cons = consensus.lock().await;
+                cons.pubkey()
+            };
+
+            let msg = TransportMessage::new(
+                MessageType::CheckpointProposal,
+                our_pubkey.clone(),
+                serde_json::to_vec(&proposal_payload).unwrap_or_default(),
+                format!("cp-{round}"),
+            );
+            let msg_bytes = serde_json::to_vec(&msg).unwrap_or_default();
+
+            let mut signatures = std::collections::HashMap::new();
+
+            // Self-sign first.
+            {
+                let cons = consensus.lock().await;
+                if let Ok(sig) = cons.sign_checkpoint(&checkpoint_block) {
+                    signatures.insert(our_pubkey.clone(), sig);
+                }
+            }
+
+            // Fan out to peers with 10s timeout per peer.
+            for peer in &peers {
+                let quic_addr = match peer.address
+                    .strip_prefix("http://")
+                    .unwrap_or(&peer.address)
+                    .parse::<SocketAddr>()
+                {
+                    Ok(a) => SocketAddr::new(a.ip(), a.port().saturating_sub(2)),
+                    Err(_) => continue,
+                };
+
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    quic.send_message(quic_addr, &msg_bytes),
+                ).await {
+                    Ok(Ok(resp_bytes)) => {
+                        // Parse vote response.
+                        if let Ok(resp) = serde_json::from_slice::<TransportMessage>(&resp_bytes) {
+                            if resp.message_type == MessageType::CheckpointVote {
+                                if let Ok(vote) = serde_json::from_slice::<CheckpointVotePayload>(&resp.payload) {
+                                    if vote.checkpoint_block_hash == checkpoint_block.block_hash {
+                                        signatures.insert(vote.voter_pubkey, vote.signature_hex);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => tracing::debug!(peer = &peer.pubkey[..8], err = %e, "checkpoint vote error"),
+                    Err(_) => tracing::debug!(peer = &peer.pubkey[..8], "checkpoint vote timeout"),
+                }
+            }
+
+            tracing::info!(round, votes = signatures.len(), "collected checkpoint votes");
+
+            // Finalize if we have enough signatures.
+            let finalized = {
+                let mut cons = consensus.lock().await;
+                cons.finalize_checkpoint(checkpoint_block.clone(), signatures.clone())
+            };
+
+            match finalized {
+                Ok(cp) => {
+                    tracing::info!(
+                        round,
+                        signers = cp.signatures.len(),
+                        "checkpoint finalized!"
+                    );
+
+                    // Broadcast finalized checkpoint to all peers (fire-and-forget).
+                    let wire = CheckpointWire {
+                        checkpoint_block: cp.checkpoint_block,
+                        signatures: cp.signatures,
+                        chain_heads: cp.chain_heads,
+                        facilitator_pubkey: cp.facilitator_pubkey,
+                        timestamp: cp.timestamp,
+                    };
+                    let finalized_payload = CheckpointFinalizedPayload {
+                        checkpoint: wire,
+                        round,
+                    };
+                    let finalized_msg = TransportMessage::new(
+                        MessageType::CheckpointFinalized,
+                        our_pubkey.clone(),
+                        serde_json::to_vec(&finalized_payload).unwrap_or_default(),
+                        format!("cpf-{round}"),
+                    );
+                    let finalized_bytes = serde_json::to_vec(&finalized_msg).unwrap_or_default();
+
+                    for peer in &peers {
+                        let quic_addr = match peer.address
+                            .strip_prefix("http://")
+                            .unwrap_or(&peer.address)
+                            .parse::<SocketAddr>()
+                        {
+                            Ok(a) => SocketAddr::new(a.ip(), a.port().saturating_sub(2)),
+                            Err(_) => continue,
+                        };
+                        let quic = quic.clone();
+                        let bytes = finalized_bytes.clone();
+                        tokio::spawn(async move {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                quic.send_message(quic_addr, &bytes),
+                            ).await;
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(round, err = %e, "checkpoint not finalized (insufficient votes)");
+                }
+            }
+        }
     }
 }

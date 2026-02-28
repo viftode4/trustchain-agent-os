@@ -24,7 +24,7 @@ pub mod trust;
 pub mod types;
 
 // Re-export key types at crate root for convenience.
-pub use blockstore::{BlockStore, DoubleSpend, MemoryBlockStore, SqliteBlockStore};
+pub use blockstore::{BlockStore, DoubleSpend, MemoryBlockStore, PersistentPeer, SqliteBlockStore};
 pub use chain::PersonalChain;
 pub use consensus::{CHECOConsensus, Checkpoint};
 pub use crawler::{BlockStoreCrawler, CrossChainLink, DAGView, TamperingReport};

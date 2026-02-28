@@ -85,7 +85,7 @@ impl WasmBlock {
         prev_hash: &str,
         block_type: &str,
         transaction_json: &str,
-        timestamp: f64,
+        timestamp: u64,
     ) -> Result<String, JsValue> {
         let secret_bytes = hex::decode(identity_hex)
             .map_err(|e| JsValue::from_str(&format!("invalid identity hex: {e}")))?;

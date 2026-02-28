@@ -13,6 +13,7 @@
 //!
 //! Non-TC destinations are forwarded transparently with zero overhead.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +53,11 @@ pub struct ProxyState<S: BlockStore + 'static> {
     pub discovery: Arc<PeerDiscovery>,
     pub quic: Arc<QuicTransport>,
     pub client: Client,
+    /// Per-peer handshake locks. Only one handshake runs at a time per peer;
+    /// concurrent requests to the same peer skip the handshake (the in-flight
+    /// one already covers this burst of activity). This matches the TrustChain
+    /// paper's model where interactions are sequential per peer pair.
+    pub peer_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl<S: BlockStore + 'static> Clone for ProxyState<S> {
@@ -61,7 +67,19 @@ impl<S: BlockStore + 'static> Clone for ProxyState<S> {
             discovery: self.discovery.clone(),
             quic: self.quic.clone(),
             client: self.client.clone(),
+            peer_locks: self.peer_locks.clone(),
         }
+    }
+}
+
+impl<S: BlockStore + 'static> ProxyState<S> {
+    /// Get or create the per-peer handshake lock.
+    async fn peer_lock(&self, pubkey: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.peer_locks.lock().await;
+        locks
+            .entry(pubkey.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 }
 
@@ -104,31 +122,44 @@ async fn proxy_handler<S: BlockStore + 'static>(
     };
 
     // 3. If TC peer: run the bilateral TrustChain handshake before forwarding.
+    //    Per the TrustChain paper, interactions are sequential per peer pair.
+    //    Use try_lock: if a handshake is already in-flight for this peer, skip —
+    //    the existing handshake covers this burst of activity.
     if let Some(ref peer) = peer {
-        let tx = serde_json::json!({
-            "proxy": true,
-            "method": req.method().as_str(),
-            "path": req.uri().path(),
-        });
+        let lock = state.peer_lock(&peer.pubkey).await;
+        let acquired = lock.try_lock();
+        if acquired.is_ok() {
+            let tx = serde_json::json!({
+                "proxy": true,
+                "method": req.method().as_str(),
+                "path": req.uri().path(),
+            });
 
-        if let Err(e) = run_handshake(&state, peer, tx).await {
-            log::warn!(
-                "TC handshake failed with {} ({}): {e}",
+            match run_handshake(&state, peer, tx).await {
+                Ok(()) => {
+                    log::debug!(
+                        "TC handshake ok -> {} ({})",
+                        &peer.pubkey[..8.min(peer.pubkey.len())],
+                        target_url,
+                    );
+                }
+                Err(e) => {
+                    // Trust recording is best-effort — log but still forward.
+                    log::warn!(
+                        "TC handshake failed with {} ({}): {e} — forwarding anyway",
+                        &peer.pubkey[..8.min(peer.pubkey.len())],
+                        target_url,
+                    );
+                }
+            }
+            // acquired (holding the guard) drops here, releasing the peer lock
+        } else {
+            // Another handshake is in-flight for this peer — skip.
+            log::debug!(
+                "TC handshake already in-flight for {} — skipping",
                 &peer.pubkey[..8.min(peer.pubkey.len())],
-                target_url,
             );
-            return (
-                StatusCode::FORBIDDEN,
-                format!("trustchain: handshake failed: {e}"),
-            )
-                .into_response();
         }
-
-        log::debug!(
-            "TC handshake ok → {} ({})",
-            &peer.pubkey[..8.min(peer.pubkey.len())],
-            target_url,
-        );
     }
 
     // 4. Forward the original call and return the response.
@@ -184,19 +215,16 @@ fn extract_authority(url: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Run the bilateral TrustChain proposal/agreement handshake with a peer over QUIC.
+///
+/// Holds the protocol lock for the entire create_proposal → QUIC round-trip →
+/// receive_agreement flow, ensuring atomicity per the TrustChain paper's model.
+/// The per-peer lock in the caller prevents concurrent handshakes to the same peer,
+/// so this only blocks other protocol operations for the duration of one QUIC round-trip.
 async fn run_handshake<S: BlockStore + 'static>(
     state: &ProxyState<S>,
     peer: &PeerRecord,
     tx: serde_json::Value,
 ) -> anyhow::Result<()> {
-    // Create proposal block.
-    let proposal = {
-        let mut proto = state.protocol.lock().await;
-        proto
-            .create_proposal(&peer.pubkey, tx, None)
-            .map_err(|e| anyhow::anyhow!("create_proposal: {e}"))?
-    };
-
     // Derive QUIC address from peer's HTTP address (QUIC is HTTP port - 2 by convention).
     let quic_addr: SocketAddr = {
         let addr = peer.address.strip_prefix("http://").unwrap_or(&peer.address);
@@ -206,11 +234,17 @@ async fn run_handshake<S: BlockStore + 'static>(
         SocketAddr::new(sa.ip(), sa.port().saturating_sub(2))
     };
 
+    // Hold the protocol lock for the entire handshake to prevent
+    // gossip or other operations from modifying chain state mid-flow.
+    let mut proto = state.protocol.lock().await;
+
+    // Create proposal block.
+    let proposal = proto
+        .create_proposal(&peer.pubkey, tx, None)
+        .map_err(|e| anyhow::anyhow!("create_proposal: {e}"))?;
+
     // Wrap proposal in a TransportMessage.
-    let our_pubkey = {
-        let proto = state.protocol.lock().await;
-        proto.pubkey()
-    };
+    let our_pubkey = proto.pubkey();
     let msg = TransportMessage::new(
         MessageType::Proposal,
         our_pubkey,
@@ -232,6 +266,11 @@ async fn run_handshake<S: BlockStore + 'static>(
     let resp_msg: TransportMessage = serde_json::from_slice(&response_bytes)
         .map_err(|e| anyhow::anyhow!("malformed QUIC response: {e}"))?;
 
+    if resp_msg.message_type == MessageType::Error {
+        let err_text = String::from_utf8_lossy(&resp_msg.payload);
+        return Err(anyhow::anyhow!("peer returned error: {err_text}"));
+    }
+
     if resp_msg.message_type != MessageType::Agreement {
         return Err(anyhow::anyhow!(
             "expected Agreement, got {:?}",
@@ -242,12 +281,9 @@ async fn run_handshake<S: BlockStore + 'static>(
     let agreement = bytes_to_block(&resp_msg.payload)
         .map_err(|e| anyhow::anyhow!("invalid agreement block: {e}"))?;
 
-    {
-        let mut proto = state.protocol.lock().await;
-        proto
-            .receive_agreement(&agreement)
-            .map_err(|e| anyhow::anyhow!("receive_agreement: {e}"))?;
-    }
+    proto
+        .receive_agreement(&agreement)
+        .map_err(|e| anyhow::anyhow!("receive_agreement: {e}"))?;
 
     Ok(())
 }

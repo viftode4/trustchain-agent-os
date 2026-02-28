@@ -2,9 +2,17 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::RwLock;
+
+/// Get the current time as milliseconds since Unix epoch.
+pub fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 /// Information about a known peer.
 #[derive(Debug, Clone)]
@@ -12,7 +20,8 @@ pub struct PeerRecord {
     pub pubkey: String,
     pub address: String,
     pub latest_seq: u64,
-    pub last_seen: Instant,
+    /// Last seen timestamp in milliseconds since Unix epoch.
+    pub last_seen_unix_ms: u64,
     pub is_bootstrap: bool,
 }
 
@@ -50,12 +59,12 @@ impl PeerDiscovery {
             pubkey: pubkey.clone(),
             address: address.clone(),
             latest_seq,
-            last_seen: Instant::now(),
+            last_seen_unix_ms: now_unix_ms(),
             is_bootstrap: self.bootstrap_nodes.contains(&address),
         });
         entry.address = address;
         entry.latest_seq = latest_seq;
-        entry.last_seen = Instant::now();
+        entry.last_seen_unix_ms = now_unix_ms();
     }
 
     /// Get all known peers.
@@ -126,8 +135,8 @@ impl PeerDiscovery {
     pub async fn get_gossip_peers(&self, max_count: usize) -> Vec<PeerRecord> {
         let peers = self.peers.read().await;
         let mut list: Vec<PeerRecord> = peers.values().cloned().collect();
-        // Sort by most recently seen first.
-        list.sort_by(|a, b| a.last_seen.elapsed().cmp(&b.last_seen.elapsed()));
+        // Sort by most recently seen first (highest unix_ms first).
+        list.sort_by(|a, b| b.last_seen_unix_ms.cmp(&a.last_seen_unix_ms));
         list.truncate(max_count);
         list
     }
