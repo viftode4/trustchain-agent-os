@@ -23,6 +23,8 @@ class TrustContext:
     caller_history: int
     agent_identity: Identity
     store: RecordStore
+    bootstrap_interactions: int = 3
+    node: object = None  # v2 TrustChainNode, set when both sides have nodes
 
     @property
     def is_trusted(self) -> bool:
@@ -31,8 +33,8 @@ class TrustContext:
 
     @property
     def is_bootstrap(self) -> bool:
-        """Whether the caller is still in bootstrap mode (< 3 interactions)."""
-        return self.caller_history < 3
+        """Whether the caller is still in bootstrap mode."""
+        return self.caller_history < self.bootstrap_interactions
 
     def check_trust(self, pubkey: str) -> float:
         """Look up the trust score for any agent."""

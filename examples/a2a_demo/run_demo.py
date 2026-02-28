@@ -31,7 +31,7 @@ import httpx
 # Configuration
 # ---------------------------------------------------------------------------
 
-TRUSTCHAIN_RS_DIR = Path(__file__).resolve().parent.parent.parent / "trustchain-rs"
+TRUSTCHAIN_RS_DIR = Path(__file__).resolve().parent.parent.parent / "trustchain"
 DEMO_DIR = Path(__file__).resolve().parent
 
 SIDECAR_A = {

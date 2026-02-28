@@ -11,7 +11,7 @@ class UpstreamServer:
     """Configuration for a single upstream MCP server."""
 
     name: str
-    command: str
+    command: str = ""
     args: List[str] = field(default_factory=list)
     env: Dict[str, str] = field(default_factory=dict)
     namespace: str = ""
@@ -31,6 +31,7 @@ class GatewayConfig:
     upstreams: List[UpstreamServer] = field(default_factory=list)
     identity_path: Optional[str] = None
     store_path: Optional[str] = None
+    upstream_identity_dir: Optional[str] = None
     default_trust_threshold: float = 0.0
     bootstrap_interactions: int = 3
     server_name: str = "TrustChain Gateway"

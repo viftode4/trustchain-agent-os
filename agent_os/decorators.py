@@ -113,7 +113,7 @@ def _create_record(ctx: TrustContext, interaction_type: str, outcome: str):
     """
     # v2: half-block recording is handled by TrustAgent.call_service,
     # not by the decorator. Skip double-recording.
-    if hasattr(ctx, "node") and ctx.node is not None:
+    if ctx.node is not None:
         return
 
     from trustchain.record import create_record

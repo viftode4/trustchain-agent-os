@@ -180,7 +180,7 @@ async def main():
     print(f"  Protocol: TrustChain v2 (half-block, proposal/agreement)")
     print(f"  Crypto: Ed25519")
     print(f"  Sybil resistance: NetFlow (max-flow from seed nodes)")
-    print(f"  335 tests passing")
+    print(f"  461 tests passing (166 Rust + 290 SDK + 171 agent-os, excl gRPC)")
 
 
 if __name__ == "__main__":

@@ -52,8 +52,11 @@ def create_gateway(
         else:
             store = RecordStore()
 
-    # Registry
-    registry = UpstreamRegistry(gateway_identity)
+    # Registry (with optional identity persistence)
+    registry = UpstreamRegistry(
+        gateway_identity,
+        identity_dir=config.upstream_identity_dir,
+    )
 
     # Create the gateway FastMCP server
     mcp = FastMCP(config.server_name)
@@ -76,7 +79,10 @@ def create_gateway(
     mcp.add_middleware(middleware)
 
     # Native trust tools
-    register_trust_tools(mcp, registry, store)
+    register_trust_tools(
+        mcp, registry, store,
+        bootstrap_interactions=config.bootstrap_interactions,
+    )
 
     logger.info(
         "Gateway '%s' ready with %d upstream(s)",
@@ -140,6 +146,7 @@ def create_gateway_from_dict(config_dict: dict) -> FastMCP:
         upstreams=upstreams,
         identity_path=config_dict.get("identity_path"),
         store_path=config_dict.get("store_path"),
+        upstream_identity_dir=config_dict.get("upstream_identity_dir"),
         default_trust_threshold=config_dict.get("default_trust_threshold", 0.0),
         bootstrap_interactions=config_dict.get("bootstrap_interactions", 3),
         server_name=config_dict.get("server_name", "TrustChain Gateway"),

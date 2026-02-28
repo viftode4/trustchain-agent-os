@@ -144,7 +144,7 @@ Alice's chain:        Bob's chain:
 ## Project Structure
 
 ```
-trustchain-rs/                  # Rust production node (4 crates, 166 tests)
+trustchain/                  # Rust production node (4 crates, 166 tests)
   trustchain-core/              #   Identity, HalfBlock, BlockStore, Protocol,
                                 #   TrustEngine, NetFlow, Consensus, Crawler
   trustchain-transport/         #   QUIC, gRPC, HTTP, proxy, discovery, STUN
@@ -158,7 +158,7 @@ trustchain/                     # Python protocol bindings
   sidecar.py                    #   Zero-config sidecar SDK (trustchain.init())
 agent_os/                       # Agent SDK (TrustAgent, decorators)
 gateway/                        # MCP Gateway with trust middleware
-frameworks/                     # Framework adapters (LangGraph, CrewAI, AutoGen...)
+tc_frameworks/                  # Framework adapters (LangGraph, CrewAI, AutoGen...)
 examples/                       # Usage examples
 tests/                          # Python test suite
 ```
@@ -169,11 +169,11 @@ tests/                          # Python test suite
 
 ```bash
 # From source
-cd trustchain-rs && cargo build --release
+cd trustchain && cargo build --release
 # Binary at target/release/trustchain-node
 
 # Or via Docker
-docker build -t trustchain trustchain-rs/
+docker build -t trustchain trustchain/
 docker run -v trustchain-data:/data trustchain
 ```
 
@@ -192,7 +192,7 @@ pip install -e ".[dev]"
 
 ```bash
 # Rust (166 tests)
-cd trustchain-rs && cargo test --workspace
+cd trustchain && cargo test --workspace
 
 # Python
 python -m pytest tests/ -v

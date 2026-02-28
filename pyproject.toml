@@ -13,26 +13,22 @@ authors = [
     { name = "Vlad Levytskyy" },
 ]
 dependencies = [
-    "cryptography>=43.0",
-    "networkx>=3.0",
+    "trustchain-sdk>=2.0",
     "fastmcp>=3.0",
-    "fastapi>=0.115",
-    "uvicorn>=0.34",
-    "httpx>=0.28",
-    "aioquic>=1.2",
-    "grpcio>=1.68",
-    "protobuf>=5.29",
-    "hypercorn>=0.17",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
+gateway = [
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
 ]
 viz = [
     "streamlit>=1.30",
     "plotly>=5.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
 ]
 
 [tool.pytest.ini_options]
@@ -40,4 +36,4 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["trustchain", "gateway", "agent_os"]
+packages = ["agent_os", "gateway", "tc_frameworks"]
