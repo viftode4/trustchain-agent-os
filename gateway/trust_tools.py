@@ -21,6 +21,7 @@ def register_trust_tools(
     registry: UpstreamRegistry,
     store: RecordStore,
     trust_engine: Optional[TrustEngine] = None,
+    bootstrap_interactions: int = 3,
 ):
     """Register TrustChain query tools on a FastMCP server instance.
 
@@ -49,7 +50,7 @@ def register_trust_tools(
         trust = _get_trust(pubkey)
         interaction_count = _get_interaction_count(pubkey)
         threshold = registry.threshold_for(server_name)
-        is_bootstrap = interaction_count < 3
+        is_bootstrap = interaction_count < bootstrap_interactions
 
         lines = [
             f"Server: {server_name}",
@@ -122,7 +123,7 @@ def register_trust_tools(
             trust = _get_trust(pubkey)
             count = _get_interaction_count(pubkey)
             threshold = registry.threshold_for(name)
-            status = "bootstrap" if count < 3 else "established"
+            status = "bootstrap" if count < bootstrap_interactions else "established"
             tc_url = registry.trustchain_url_for(name)
             tc_info = f" tc_url={tc_url}" if tc_url else ""
             lines.append(
@@ -195,15 +196,15 @@ def register_trust_tools(
 
         pubkey = identity.pubkey_hex
 
-        # v2: Use BlockStoreCrawler
+        # v2: Use BlockStoreCrawler, filtered to the requested peer's chain
         if trust_engine:
             from trustchain.crawler import BlockStoreCrawler
             crawler = BlockStoreCrawler(trust_engine.store)
-            report = crawler.detect_tampering()
+            report = crawler.detect_tampering(pubkey=pubkey)
 
-            block_count = trust_engine.store.get_block_count()
+            chain_length = trust_engine.store.get_latest_seq(pubkey)
             if report.is_clean:
-                return f"Server '{server_name}': chain is clean ({block_count} blocks)"
+                return f"Server '{server_name}': chain is clean ({chain_length} blocks)"
             else:
                 lines = [f"Server '{server_name}': {report.issue_count} issue(s) found"]
                 for issue in report.chain_gaps:

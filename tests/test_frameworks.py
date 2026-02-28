@@ -12,7 +12,7 @@ from gateway.config import UpstreamServer
 from gateway.recorder import InteractionRecorder
 from gateway.registry import UpstreamRegistry
 
-from frameworks.mock import (
+from tc_frameworks.mock import (
     ALL_MOCKS,
     CrewAIMock,
     OpenAIAgentsMock,

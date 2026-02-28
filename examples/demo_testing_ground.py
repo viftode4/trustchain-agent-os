@@ -31,7 +31,7 @@ from gateway.recorder import InteractionRecorder
 from gateway.registry import UpstreamRegistry
 from gateway.trust_tools import register_trust_tools
 
-from frameworks.mock import (
+from tc_frameworks.mock import (
     CrewAIMock,
     OpenAIAgentsMock,
     AutoGenMock,

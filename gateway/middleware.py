@@ -73,14 +73,13 @@ class TrustChainMiddleware(Middleware):
     def _get_interaction_count(self, pubkey: str) -> int:
         """Get interaction count for a peer.
 
-        v2: Uses our own chain's interactions with this peer (blocks where
-        link_public_key == pubkey).
+        v2: Counts interactions in both directions — our proposals to them
+        plus their proposals to us. This ensures bootstrap mode exits
+        correctly even when the gateway acts as responder.
         v1: Counts records involving this pubkey.
         """
         if self.gateway_node:
-            # Count blocks on our chain that link to this peer
-            our_chain = self.gateway_node.store.get_chain(self.gateway_node.pubkey)
-            return sum(1 for b in our_chain if b.link_public_key == pubkey)
+            return self.gateway_node._count_peer_interactions(pubkey)
         return len(self.store.get_records_for(pubkey))
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
@@ -176,8 +175,7 @@ class TrustChainMiddleware(Middleware):
                 proposal = self.gateway_node.protocol.create_proposal(
                     upstream_pubkey, transaction
                 )
-                # If the peer is registered, we could send via HTTP, but for
-                # local recording we just create the proposal on our chain.
+                self.gateway_node.invalidate_count_cache(upstream_pubkey)
                 logger.debug(
                     "Recorded v2 half-block for tool:%s -> %s",
                     tool_name,

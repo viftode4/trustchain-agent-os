@@ -268,22 +268,57 @@ class TrustAgent:
             caller_pubkey=self.pubkey,
         )
 
-        outcome = "completed" if accepted else "failed"
+        # outcome=failed if: trust gate denied, OR handler raised an exception
+        outcome = "completed" if (accepted and "failed" not in reason) else "failed"
 
         # v2 path: proper half-block protocol
+        # Only create proposal/agreement when the call was accepted.
+        # Creating a proposal for denied calls would leave orphan blocks.
+        #
+        # Trust recording is infrastructure — if the protocol layer fails,
+        # the agent interaction result is still returned. We log the error
+        # but never let trust machinery break the agent-to-agent call.
         if self._node and provider._node:
-            transaction = {
-                "interaction_type": service_name,
-                "outcome": outcome,
-                "timestamp": _time.time(),
-            }
-            proposal = self._node.protocol.create_proposal(
-                provider.pubkey, transaction
-            )
             if accepted:
-                provider._node.protocol.receive_proposal(proposal)
-                agreement = provider._node.protocol.create_agreement(proposal)
-                self._node.protocol.receive_agreement(agreement)
+                try:
+                    transaction = {
+                        "interaction_type": service_name,
+                        "outcome": outcome,
+                        "timestamp": int(_time.time() * 1000),
+                    }
+                    proposal = self._node.protocol.create_proposal(
+                        provider.pubkey, transaction
+                    )
+                    provider._node.protocol.receive_proposal(proposal)
+                    agreement = provider._node.protocol.create_agreement(proposal)
+                    self._node.protocol.receive_agreement(agreement)
+                except Exception as e:
+                    logger.error(
+                        "v2 trust recording failed for %s -> %s (%s): %s",
+                        self.name, provider.name, service_name, e,
+                    )
+            else:
+                # Denied calls: record as a lightweight v1 record so the
+                # trust engine can see repeated failed attempts (useful for
+                # detecting malicious callers). No half-block is created —
+                # that would leave orphan proposals on the chain.
+                try:
+                    seq_a = self.store.sequence_number_for(self.pubkey)
+                    seq_b = self.store.sequence_number_for(provider.pubkey)
+                    prev_hash_a = self.store.last_hash_for(self.pubkey)
+                    prev_hash_b = self.store.last_hash_for(provider.pubkey)
+                    record = create_record(
+                        identity_a=self.identity,
+                        identity_b=provider.identity,
+                        seq_a=seq_a, seq_b=seq_b,
+                        prev_hash_a=prev_hash_a, prev_hash_b=prev_hash_b,
+                        interaction_type=service_name,
+                        outcome="denied",
+                    )
+                    if verify_record(record):
+                        self.store.add_record(record)
+                except Exception as e:
+                    logger.debug("Failed to record denied v2 attempt: %s", e)
             return accepted, reason, result
 
         # v1 compat path: bilateral record

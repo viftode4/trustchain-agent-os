@@ -16,10 +16,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out trustchain-sdk (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: levvlad/trustchain-sdk
+          path: trustchain-sdk
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Install trustchain-sdk from source
+        run: pip install -e ./trustchain-sdk
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
@@ -32,13 +41,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out trustchain-sdk (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: levvlad/trustchain-sdk
+          path: trustchain-sdk
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
+      - name: Install trustchain-sdk from source
+        run: pip install -e ./trustchain-sdk
+
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
       - name: Check imports
-        run: python -c "import trustchain; import agent_os; import gateway; import frameworks"
+        run: python -c "import agent_os; import gateway; import tc_frameworks"
