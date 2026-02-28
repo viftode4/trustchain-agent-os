@@ -4,7 +4,7 @@ members = [
     "trustchain-core",
     "trustchain-transport",
     "trustchain-node",
-    # "trustchain-wasm",  # Enable when ready for WASM builds
+    "trustchain-wasm",
 ]
 
 [workspace.package]
