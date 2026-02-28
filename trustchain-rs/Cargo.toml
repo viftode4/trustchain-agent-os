@@ -61,6 +61,10 @@ tower = "0.5"
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 
+# MCP (Model Context Protocol)
+rmcp = { version = "0.17", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
+schemars = "1"
+
 # Build
 tonic-build = "0.12"
 prost-build = "0.13"

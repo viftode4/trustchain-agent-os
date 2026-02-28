@@ -10,6 +10,10 @@ description = "TrustChain standalone node binary"
 name = "trustchain-node"
 path = "src/main.rs"
 
+[features]
+default = ["mcp"]
+mcp = ["trustchain-transport/mcp", "dep:rmcp"]
+
 [dependencies]
 trustchain-core = { workspace = true }
 trustchain-transport = { workspace = true }
@@ -24,6 +28,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow = { workspace = true }
 reqwest = { workspace = true }
+axum = { workspace = true }
+rmcp = { workspace = true, optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "blocking"] }

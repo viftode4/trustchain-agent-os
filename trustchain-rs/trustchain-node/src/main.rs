@@ -36,6 +36,18 @@ enum Commands {
         config: String,
     },
 
+    /// Run MCP server over stdio for local LLM hosts (Claude Desktop, Cursor, etc.).
+    #[cfg(feature = "mcp")]
+    McpStdio {
+        /// Agent name (used for data directory: ~/.trustchain/<name>/).
+        #[arg(long, default_value = "trustchain")]
+        name: String,
+
+        /// Data directory override. Defaults to ~/.trustchain/<name>/.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
     /// Run as a sidecar next to an agent — one command to join the trust network.
     ///
     /// Generates identity, starts all services (QUIC, gRPC, HTTP, proxy),
@@ -140,6 +152,40 @@ async fn main() -> anyhow::Result<()> {
 
             let node = Node::new(identity, config);
             node.run().await?;
+        }
+
+        #[cfg(feature = "mcp")]
+        Commands::McpStdio { name, data_dir } => {
+            let dir = data_dir.unwrap_or_else(|| {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(home).join(".trustchain").join(&name)
+            });
+            std::fs::create_dir_all(&dir).ok();
+
+            let key_path = dir.join("identity.key");
+            let identity = if key_path.exists() {
+                Identity::load(&key_path)?
+            } else {
+                let id = Identity::generate();
+                id.save(&key_path)?;
+                eprintln!("Generated identity: {}", id.pubkey_hex());
+                id
+            };
+
+            let db_path = dir.join("trustchain.db");
+            let store = trustchain_core::SqliteBlockStore::open(&db_path)
+                .map_err(|e| anyhow::anyhow!("Failed to open database: {e}"))?;
+            let protocol = trustchain_core::TrustChainProtocol::new(identity.clone(), store);
+            let discovery =
+                trustchain_transport::PeerDiscovery::new(identity.pubkey_hex(), vec![]);
+
+            trustchain_transport::mcp::run_mcp_stdio(
+                std::sync::Arc::new(tokio::sync::Mutex::new(protocol)),
+                std::sync::Arc::new(discovery),
+            )
+            .await?;
         }
 
         Commands::Sidecar {

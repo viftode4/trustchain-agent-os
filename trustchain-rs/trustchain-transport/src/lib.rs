@@ -11,6 +11,8 @@ pub mod discover;
 pub mod discovery;
 pub mod grpc;
 pub mod http;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod message;
 pub mod pool;
 pub mod proxy;

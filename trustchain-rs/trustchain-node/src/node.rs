@@ -14,7 +14,7 @@ use trustchain_core::{
 use trustchain_transport::{
     AppState, ConnectionPool, PeerDiscovery, ProxyState, QuicTransport,
     discover,
-    start_grpc_server, start_http_server, start_proxy_server,
+    build_router, start_grpc_server, start_proxy_server,
     message::{
         BlockPairBroadcastPayload, CheckpointFinalizedPayload, CheckpointProposalPayload,
         CheckpointVotePayload, CheckpointWire, FraudProofPayload, MessageType,
@@ -186,7 +186,7 @@ impl Node {
         });
         tracing::info!(%grpc_addr, "gRPC service ready");
 
-        // Start HTTP REST API — with QUIC transport for P2P proposal flow.
+        // Start HTTP REST API (+ MCP if feature enabled).
         let http_addr: SocketAddr = self.config.http_addr.parse()?;
         let http_state = AppState {
             protocol: self.protocol.clone(),
@@ -194,12 +194,41 @@ impl Node {
             quic: Some(quic_accept_handle.1.clone()),
             agent_endpoint: self.config.agent_endpoint.clone(),
         };
+
+        #[cfg(feature = "mcp")]
+        let mcp_protocol = self.protocol.clone();
+        #[cfg(feature = "mcp")]
+        let mcp_discovery = self.discovery.clone();
+        #[cfg(feature = "mcp")]
+        let mcp_endpoint = self.config.agent_endpoint.clone();
+
         let http_handle = tokio::spawn(async move {
-            if let Err(e) = start_http_server(http_addr, http_state).await {
+            let router = build_router(http_state);
+
+            #[cfg(feature = "mcp")]
+            let router = {
+                let mcp_svc = trustchain_transport::mcp::build_mcp_http_service(
+                    mcp_protocol,
+                    mcp_discovery,
+                    mcp_endpoint,
+                );
+                router.nest_service("/mcp", mcp_svc)
+            };
+
+            let listener = match tokio::net::TcpListener::bind(http_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!("HTTP bind failed: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = axum::serve(listener, router).await {
                 tracing::error!("HTTP server error: {e}");
             }
         });
         tracing::info!(%http_addr, "HTTP API ready");
+        #[cfg(feature = "mcp")]
+        tracing::info!("MCP endpoint: http://{http_addr}/mcp");
 
         // Start transparent HTTP proxy (agent sidecar).
         let proxy_addr: SocketAddr = self.config.proxy_addr.parse()?;
