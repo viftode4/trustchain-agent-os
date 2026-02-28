@@ -39,6 +39,7 @@ class AutoGenAdapter(FrameworkAdapter):
             {"name": "assistant", "system_message": "You are a helpful assistant."},
         ]
         self.llm_config = llm_config or {"model": "gpt-4o-mini"}
+        self._agents = None  # Cached agent instances
 
     def _build_agents(self):
         """Build AG2 agents from config."""
@@ -62,7 +63,9 @@ class AutoGenAdapter(FrameworkAdapter):
         @mcp.tool(name="group_chat_run")
         async def group_chat_run(message: str, max_turns: int = 3) -> str:
             """Run a message through the AG2 group chat."""
-            agents = adapter._build_agents()
+            if adapter._agents is None:
+                adapter._agents = adapter._build_agents()
+            agents = adapter._agents
             if len(agents) < 2:
                 result = agents[0].generate_reply(
                     messages=[{"role": "user", "content": message}]

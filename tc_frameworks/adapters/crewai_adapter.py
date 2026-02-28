@@ -97,7 +97,7 @@ class CrewAIAdapter(FrameworkAdapter):
             """Run the CrewAI crew with the given inputs."""
             if adapter._crew is None:
                 adapter._crew = adapter._build_crew()
-            result = adapter._crew.kickoff(inputs=inputs)
+            result = await adapter._crew.kickoff_async(inputs=inputs)
             return str(result)
 
         return mcp

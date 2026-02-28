@@ -8,11 +8,14 @@ from typing import Optional
 from fastmcp import FastMCP
 from fastmcp.server import create_proxy
 
+from trustchain.blockstore import MemoryBlockStore
 from trustchain.identity import Identity
 from trustchain.store import FileRecordStore, RecordStore
+from trustchain.trust import TrustEngine
 
 from gateway.config import GatewayConfig, UpstreamServer
 from gateway.middleware import TrustChainMiddleware
+from gateway.node import GatewayNode
 from gateway.recorder import InteractionRecorder
 from gateway.registry import UpstreamRegistry
 from gateway.trust_tools import register_trust_tools
@@ -68,6 +71,19 @@ def create_gateway(
     # Recorder
     recorder = InteractionRecorder(gateway_identity, store)
 
+    # v2: Create GatewayNode + TrustEngine for half-block protocol
+    gateway_node = None
+    trust_engine = None
+    if config.use_v2:
+        block_store = MemoryBlockStore()
+        gateway_node = GatewayNode(
+            identity=gateway_identity,
+            store=block_store,
+            seed_nodes=[gateway_identity.pubkey_hex],
+        )
+        trust_engine = gateway_node.trust_engine
+        logger.info("Gateway v2 enabled: GatewayNode with half-block protocol")
+
     # Middleware
     middleware = TrustChainMiddleware(
         registry=registry,
@@ -75,6 +91,8 @@ def create_gateway(
         store=store,
         default_threshold=config.default_trust_threshold,
         bootstrap_interactions=config.bootstrap_interactions,
+        trust_engine=trust_engine,
+        gateway_node=gateway_node,
     )
     mcp.add_middleware(middleware)
 
@@ -150,5 +168,6 @@ def create_gateway_from_dict(config_dict: dict) -> FastMCP:
         default_trust_threshold=config_dict.get("default_trust_threshold", 0.0),
         bootstrap_interactions=config_dict.get("bootstrap_interactions", 3),
         server_name=config_dict.get("server_name", "TrustChain Gateway"),
+        use_v2=config_dict.get("use_v2", False),
     )
     return create_gateway(config)

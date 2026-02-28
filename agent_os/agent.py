@@ -26,14 +26,6 @@ from agent_os.decorators import TrustGateError
 logger = logging.getLogger("trustchain.agent")
 
 
-SERVICE_TIERS = {
-    "basic": 0.0,
-    "compute": 0.3,
-    "data": 0.3,
-    "code_review": 0.6,
-}
-
-
 @dataclass
 class _ServiceRegistration:
     """Internal tracking for a registered service."""
@@ -226,6 +218,7 @@ class TrustAgent:
             caller_history=caller_history,
             agent_identity=self.identity,
             store=self.store,
+            node=self._node,
         )
 
         # Execute handler
@@ -347,6 +340,83 @@ class TrustAgent:
 
         return accepted, reason, result
 
+    # ---- Remote Service Calls (via Sidecar) ----
+
+    async def call_remote_service(
+        self,
+        peer_url: str,
+        service_name: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        peer_pubkey: Optional[str] = None,
+        sidecar_url: Optional[str] = None,
+    ) -> Tuple[bool, str, Any]:
+        """Call a remote agent's service over HTTP, optionally through the sidecar proxy.
+
+        If sidecar_url is provided, the bilateral trust handshake is handled
+        automatically via the sidecar's /propose endpoint.
+
+        Args:
+            peer_url: HTTP URL of the remote agent (e.g. http://host:8080/tool)
+            service_name: Name of the service/tool to invoke
+            data: Payload dict
+            peer_pubkey: Remote agent's public key (for trust recording)
+            sidecar_url: Local sidecar HTTP URL (e.g. http://localhost:8202)
+        """
+        import json
+        import os
+        import urllib.request
+
+        data = data or {}
+
+        # Call the remote service
+        try:
+            body = json.dumps({"data": data, "caller_pubkey": self.pubkey}).encode()
+            req = urllib.request.Request(
+                f"{peer_url}/{service_name}",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+
+            # If HTTP_PROXY is set (sidecar transparent mode), urllib uses it automatically
+            proxy_url = os.environ.get("HTTP_PROXY", "")
+            if proxy_url:
+                proxy_handler = urllib.request.ProxyHandler({"http": proxy_url})
+                opener = urllib.request.build_opener(proxy_handler)
+            else:
+                opener = urllib.request.build_opener()
+
+            resp = opener.open(req, timeout=30)
+            result = json.loads(resp.read().decode())
+        except Exception as e:
+            return False, f"Remote call failed: {e}", None
+
+        # If sidecar is available and we have the peer's pubkey, record via /propose
+        sidecar = sidecar_url or os.environ.get("TRUSTCHAIN_HTTP", "")
+        if sidecar and peer_pubkey:
+            try:
+                propose_body = json.dumps({
+                    "counterparty_pubkey": peer_pubkey,
+                    "transaction": {
+                        "interaction_type": service_name,
+                        "outcome": "completed",
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                }).encode()
+                propose_req = urllib.request.Request(
+                    f"{sidecar}/propose",
+                    data=propose_body,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                opener_direct = urllib.request.build_opener()
+                opener_direct.open(propose_req, timeout=10)
+            except Exception as e:
+                logger.warning("Sidecar trust recording failed: %s", e)
+
+        return True, f"{service_name} completed", result
+
     # ---- MCP Server Export ----
 
     def as_mcp_server(self, name: Optional[str] = None) -> FastMCP:
@@ -366,7 +436,7 @@ class TrustAgent:
             ) -> str:
                 data = data or {}
                 if not caller_pubkey:
-                    caller_pubkey = "anonymous"
+                    return "DENIED: caller_pubkey is required for trust-gated services"
                 accepted, reason, result = await agent.handle_service_call(
                     _svc, data, caller_pubkey
                 )
