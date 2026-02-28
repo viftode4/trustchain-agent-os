@@ -73,3 +73,6 @@ from trustchain.exceptions import (
     SequenceGapError,
     SignatureError,
 )
+
+# === Sidecar SDK (zero-config) ===
+from trustchain.sidecar import init, protect, TrustChainSidecar

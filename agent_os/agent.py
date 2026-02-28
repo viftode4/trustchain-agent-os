@@ -268,7 +268,8 @@ class TrustAgent:
             caller_pubkey=self.pubkey,
         )
 
-        outcome = "completed" if accepted else "failed"
+        # outcome=failed if: trust gate denied, OR handler raised an exception
+        outcome = "completed" if (accepted and "failed" not in reason) else "failed"
 
         # v2 path: proper half-block protocol
         if self._node and provider._node:
