@@ -437,7 +437,7 @@ def register_trust_tools(
     ) -> str:
         """Get detailed trust score breakdown for a server.
 
-        v2: Shows chain integrity, netflow, and statistical components.
+        v2: Shows chain integrity and netflow components.
         """
         err = _check_caller_auth(
             caller_pubkey, caller_signature, caller_nonce, "trustchain_trust_score"
@@ -453,14 +453,12 @@ def register_trust_tools(
         if trust_engine:
             integrity = trust_engine.compute_chain_integrity(pubkey)
             netflow = trust_engine.compute_netflow_score(pubkey)
-            statistical = trust_engine.compute_statistical_score(pubkey)
             combined = trust_engine.compute_trust(pubkey)
             lines = [
                 f"Server: {server_name}",
                 f"Combined Trust: {combined:.3f}",
-                f"  Chain Integrity: {integrity:.3f} (weight: 0.3)",
-                f"  NetFlow Score: {netflow:.3f} (weight: 0.4)",
-                f"  Statistical Score: {statistical:.3f} (weight: 0.3)",
+                f"  Chain Integrity: {integrity:.3f} (weight: 0.5)",
+                f"  NetFlow Score: {netflow:.3f} (weight: 0.5)",
             ]
         else:
             trust = compute_trust(pubkey, store)

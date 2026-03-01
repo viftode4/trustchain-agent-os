@@ -1,18 +1,20 @@
 # TrustChain Agent OS
 
 [![PyPI](https://img.shields.io/pypi/v/trustchain-agent-os.svg)](https://pypi.org/project/trustchain-agent-os/)
-[![CI](https://github.com/levvlad/trustchain-agent-os/actions/workflows/ci.yml/badge.svg)](https://github.com/levvlad/trustchain-agent-os/actions)
+[![CI](https://github.com/viftode4/trustchain-agent-os/actions/workflows/ci.yml/badge.svg)](https://github.com/viftode4/trustchain-agent-os/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **Trust-native protocol layer for AI agents.**
 
-Every agent protocol (MCP, A2A, ACP, ANP) handles communication. None handle trust. TrustChain Agent OS is the missing layer underneath all of them — a gateway and a set of framework adapters that bring bilateral signed interaction records, NetFlow Sybil resistance, and automatic trust scoring to LangGraph, CrewAI, AutoGen, OpenAI Agents, Google ADK, and ElizaOS. 179 tests.
+Every agent protocol (MCP, A2A, ACP, ANP) handles communication. None handle trust. TrustChain Agent OS is the missing layer underneath all of them — a gateway and a set of framework adapters that bring bilateral signed interaction records, NetFlow Sybil resistance, and automatic trust scoring to 12 major agent frameworks. 205 tests.
 
-Built on [trustchain-sdk](https://github.com/levvlad/trustchain-sdk) and the [trustchain](https://github.com/levvlad/trustchain) Rust node.
+> **[Read the full TrustChain overview →](docs/TRUSTCHAIN-OVERVIEW.md)** — what it is, how it works, and why it matters.
+
+Built on [trustchain-py](https://github.com/viftode4/trustchain-py) and the [trustchain](https://github.com/viftode4/trustchain) Rust node.
 
 ## Key Features
 
-- **Framework adapters** — drop-in trust layer for LangGraph, CrewAI, AutoGen, OpenAI Agents, Google ADK, and ElizaOS; no agent code changes required beyond initialization
+- **Framework adapters** — drop-in trust layer for 12 frameworks: LangGraph, CrewAI, AutoGen, OpenAI Agents, Google ADK, ElizaOS, Claude (Anthropic), Smolagents, PydanticAI, Semantic Kernel, Agno, and LlamaIndex; no agent code changes required beyond initialization
 - **MCP gateway** — FastAPI server that exposes downstream MCP tool servers behind a trust middleware; every tool call is recorded as a bilateral interaction
 - **Trust-gated services** — `@service` decorator enforces `min_trust` thresholds before any call reaches agent business logic
 - **TrustAgent primitive** — lightweight agent abstraction with built-in identity, trust tracking, and service registry
@@ -33,7 +35,7 @@ pip install trustchain-agent-os[viz]       # Streamlit + Plotly trust graph visu
 pip install trustchain-agent-os[dev]       # pytest + pytest-asyncio
 ```
 
-Requires Python 3.11+. Depends on `trustchain-sdk>=2.0` and `fastmcp>=3.0`.
+Requires Python 3.11+. Depends on `trustchain-py>=2.0` and `fastmcp>=3.0`.
 
 ## Quick Start
 
@@ -166,7 +168,7 @@ All adapters are cached — the underlying agent/crew/graph is built once on fir
 │  FastAPI MCP gateway · trust middleware · interaction recorder  │
 │  peer registry · trust_tools (MCP tool wrappers)               │
 ├─────────────────────────────────────────────────────────────────┤
-│  trustchain-sdk  (Python)                                        │
+│  trustchain-py  (Python)                                        │
 │  Identity · HalfBlock · BlockStore · TrustEngine · NetFlow      │
 ├─────────────────────────────────────────────────────────────────┤
 │  trustchain-node  (Rust sidecar, optional)                       │
@@ -194,22 +196,35 @@ trustchain-agent-os/
 │
 ├── tc_frameworks/
 │   ├── base.py           TrustChainAdapter base class
-│   ├── adapters/         Real framework adapters (6)
+│   ├── adapters/         Real framework adapters (12)
 │   │   ├── langgraph_adapter.py
 │   │   ├── crewai_adapter.py
 │   │   ├── autogen_adapter.py
 │   │   ├── openai_agents_adapter.py
 │   │   ├── google_adk_adapter.py
-│   │   └── elizaos_adapter.py
-│   └── mock/             Mock adapters for testing (6, mirror structure above)
+│   │   ├── elizaos_adapter.py
+│   │   ├── claude_agent_adapter.py
+│   │   ├── smolagents_adapter.py
+│   │   ├── pydantic_ai_adapter.py
+│   │   ├── semantic_kernel_adapter.py
+│   │   ├── agno_adapter.py
+│   │   └── llamaindex_adapter.py
+│   └── mock/             Mock adapters for testing (6)
 │
 ├── examples/             Runnable examples
-│   ├── hello_trust.py    Minimal TrustAgent demo
-│   ├── marketplace.py    Multi-agent marketplace simulation
-│   ├── network.py        P2P network simulation
-│   ├── trust_gate.py     Trust-gated service demo
-│   ├── llm_agents.py     LLM-backed agents with trust
-│   └── demo_gateway.py   MCP gateway demo
+│   ├── hello_trust.py        Minimal TrustAgent demo
+│   ├── trust_gate.py         Trust-gated service demo
+│   ├── framework_interop.py  11 frameworks, one trust ledger (USB-C of trust)
+│   ├── multi_provider_team.py  Collaborative pipeline with trust gates
+│   ├── agent_marketplace.py  Competitive agents with Sybil detection
+│   ├── marketplace.py        Multi-agent marketplace simulation
+│   ├── network.py            P2P network simulation
+│   ├── llm_agents.py         LLM-backed agents with trust
+│   └── demo_gateway.py       MCP gateway demo
+│
+├── docs/
+│   ├── TRUSTCHAIN-OVERVIEW.md  Comprehensive project overview and use cases
+│   └── results/                Demo run outputs with analysis
 │
 └── tests/
     ├── integration/      126 integration tests
@@ -230,18 +245,18 @@ trustchain-agent-os/
 ## Development
 
 ```bash
-git clone https://github.com/levvlad/trustchain-agent-os.git
+git clone https://github.com/viftode4/trustchain-agent-os.git
 cd trustchain-agent-os
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-The CI pipeline checks out `trustchain-sdk` from its sibling repository before install.
+The CI pipeline checks out `trustchain-py` from its sibling repository before install.
 
 ## Related Projects
 
-- [trustchain](https://github.com/levvlad/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 181 tests
-- [trustchain-sdk](https://github.com/levvlad/trustchain-sdk) — Python SDK: zero-config `trustchain.init()`, full protocol bindings, 290 tests
+- [trustchain](https://github.com/viftode4/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 214 tests
+- [trustchain-py](https://github.com/viftode4/trustchain-py) — Python SDK: zero-config `trustchain.init()`, full protocol bindings, 174 tests
 
 ## License
 

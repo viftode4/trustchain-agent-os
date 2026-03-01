@@ -786,7 +786,6 @@ class TestTrustScoreTool:
             assert "Combined Trust" in text
             assert "Chain Integrity" in text
             assert "NetFlow Score" in text
-            assert "Statistical Score" in text
 
 
 # ---------------------------------------------------------------------------

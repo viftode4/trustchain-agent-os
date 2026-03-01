@@ -17,11 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check out trustchain-sdk (sibling dependency)
+      - name: Check out trustchain-py (sibling dependency)
         uses: actions/checkout@v4
         with:
-          repository: viftode4/trustchain-sdk
-          path: trustchain-sdk
+          repository: viftode4/trustchain-py
+          path: trustchain-py
           # TODO: Pin to a tagged release (e.g., ref: v2.1.0) for stable CI
           ref: master
 
@@ -38,8 +38,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-${{ matrix.python-version }}-
 
-      - name: Install trustchain-sdk from source
-        run: pip install -e ./trustchain-sdk
+      - name: Install trustchain-py from source
+        run: pip install -e ./trustchain-py
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
@@ -52,11 +52,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check out trustchain-sdk (sibling dependency)
+      - name: Check out trustchain-py (sibling dependency)
         uses: actions/checkout@v4
         with:
-          repository: viftode4/trustchain-sdk
-          path: trustchain-sdk
+          repository: viftode4/trustchain-py
+          path: trustchain-py
           # TODO: Pin to a tagged release (e.g., ref: v2.1.0) for stable CI
           ref: master
 
@@ -65,8 +65,8 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install trustchain-sdk from source
-        run: pip install -e ./trustchain-sdk
+      - name: Install trustchain-py from source
+        run: pip install -e ./trustchain-py
 
       - name: Install dependencies
         run: pip install -e ".[dev]"

@@ -13,7 +13,7 @@ authors = [
     { name = "Vlad Levytskyy" },
 ]
 dependencies = [
-    "trustchain-sdk>=2.0",
+    "trustchain-py>=2.0",
     "fastmcp>=3.0",
 ]
 

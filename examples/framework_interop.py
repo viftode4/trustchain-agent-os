@@ -25,7 +25,7 @@ if not GEMINI_KEY:
 os.environ["GOOGLE_API_KEY"] = GEMINI_KEY
 
 # Spread across models — free tier = 20 RPD per model per project
-MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-lite"]
+MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-lite"]
 
 
 def model_for(idx: int) -> str:
