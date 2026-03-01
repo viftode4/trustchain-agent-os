@@ -45,7 +45,15 @@ class AutoGenAdapter(FrameworkAdapter):
         """Build AG2 agents from config."""
         from autogen import ConversableAgent, LLMConfig
 
-        llm_config = LLMConfig(**self.llm_config)
+        # Support Gemini via GeminiLLMConfigEntry
+        api_type = self.llm_config.get("api_type", "")
+        if api_type == "google":
+            from autogen.oai.gemini import GeminiLLMConfigEntry
+            entry = GeminiLLMConfigEntry(**self.llm_config)
+            llm_config = LLMConfig(entry)
+        else:
+            llm_config = LLMConfig(self.llm_config)
+
         agents = []
         for cfg in self.agents_config:
             agent = ConversableAgent(

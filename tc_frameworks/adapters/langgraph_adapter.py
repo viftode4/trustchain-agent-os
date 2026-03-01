@@ -1,6 +1,6 @@
 """Real LangGraph adapter — wraps a LangGraph agent as a trust-gated MCP server.
 
-Requires: pip install langgraph langchain-openai  (or langchain-anthropic, etc.)
+Requires: pip install langgraph langchain-openai  (or langchain-anthropic, langchain-google-genai)
 
 Usage:
     from tc_frameworks.adapters.langgraph_adapter import LangGraphAdapter
@@ -10,7 +10,8 @@ Usage:
     def search(query: str) -> str:
         return f"Results for {query}"
 
-    adapter = LangGraphAdapter(tools=[search])
+    adapter = LangGraphAdapter(tools=[search], model_provider="google",
+                               model_name="gemini-2.5-flash-lite")
     mcp_server = adapter.create_mcp_server()
 """
 
@@ -27,17 +28,19 @@ class LangGraphAdapter(FrameworkAdapter):
     """Wraps a real LangGraph ReAct agent as a FastMCP server."""
 
     framework_name = "LangGraph"
-    framework_version = "1.0.7"
+    framework_version = "1.0.10"
 
     def __init__(
         self,
         tools: Optional[List] = None,
         model_name: str = "gpt-4o-mini",
         model_provider: str = "openai",
+        api_key: Optional[str] = None,
     ):
         self.tools = tools or []
         self.model_name = model_name
         self.model_provider = model_provider
+        self.api_key = api_key
         self._agent = None  # Cached agent graph
 
     def _build_agent(self):
@@ -50,6 +53,12 @@ class LangGraphAdapter(FrameworkAdapter):
         elif self.model_provider == "anthropic":
             from langchain_anthropic import ChatAnthropic
             model = ChatAnthropic(model=self.model_name)
+        elif self.model_provider == "google":
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            kwargs: Dict[str, Any] = {"model": self.model_name}
+            if self.api_key:
+                kwargs["google_api_key"] = self.api_key
+            model = ChatGoogleGenerativeAI(**kwargs)
         else:
             raise ValueError(f"Unsupported model provider: {self.model_provider}")
 

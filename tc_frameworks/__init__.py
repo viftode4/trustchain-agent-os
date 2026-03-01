@@ -7,4 +7,10 @@ SUPPORTED_FRAMEWORKS = [
     "langgraph",
     "google_adk",
     "elizaos",
+    "claude_agent",
+    "smolagents",
+    "pydantic_ai",
+    "semantic_kernel",
+    "agno",
+    "llamaindex",
 ]

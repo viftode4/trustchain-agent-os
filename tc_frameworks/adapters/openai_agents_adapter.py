@@ -37,7 +37,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         agent_name: str = "assistant",
         instructions: str = "You are a helpful assistant.",
         tools: Optional[List[Callable]] = None,
-        model: str = "gpt-4o-mini",
+        model: Any = "gpt-4o-mini",
     ):
         self.agent_name = agent_name
         self.instructions = instructions
