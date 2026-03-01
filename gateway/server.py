@@ -99,6 +99,7 @@ def create_gateway(
     # Native trust tools
     register_trust_tools(
         mcp, registry, store,
+        trust_engine=trust_engine,
         bootstrap_interactions=config.bootstrap_interactions,
     )
 

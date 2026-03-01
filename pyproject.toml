@@ -17,6 +17,11 @@ dependencies = [
     "fastmcp>=3.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/viftode4/trustchain-agent-os"
+Repository = "https://github.com/viftode4/trustchain-agent-os"
+Issues = "https://github.com/viftode4/trustchain-agent-os/issues"
+
 [project.optional-dependencies]
 gateway = [
     "fastapi>=0.115",
@@ -25,6 +30,18 @@ gateway = [
 viz = [
     "streamlit>=1.30",
     "plotly>=5.0",
+]
+langgraph = ["langgraph>=0.2"]
+crewai = ["crewai>=0.80"]
+autogen = ["ag2>=0.6"]
+google-adk = ["google-adk>=1.0"]
+openai-agents = ["openai-agents>=0.0.5"]
+all-frameworks = [
+    "langgraph>=0.2",
+    "crewai>=0.80",
+    "ag2>=0.6",
+    "google-adk>=1.0",
+    "openai-agents>=0.0.5",
 ]
 dev = [
     "pytest>=8.0",

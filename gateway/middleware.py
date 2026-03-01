@@ -164,9 +164,26 @@ class TrustChainMiddleware(Middleware):
         tool_name: str,
         outcome: str,
     ) -> None:
-        """Record the interaction using v2 half-blocks or v1 records."""
+        """Record the interaction using v2 half-blocks or v1 records.
+
+        v2 half-block semantics: The gateway is always the *initiator* of MCP
+        tool calls, so it creates a Proposal half-block to record its side of
+        the interaction.  The corresponding Agreement half-block must come from
+        the upstream agent's own sidecar — it is returned to that sidecar via
+        the /receive_proposal endpoint during the bilateral P2P handshake
+        (see handle_propose / handle_receive_proposal in trustchain-transport
+        http.rs).  This middleware does NOT create the agreement because:
+          1. MCP tool calls are in-process and have no round-trip signalling
+             channel back to the upstream sidecar.
+          2. The upstream sidecar is responsible for signing its own half-block;
+             the gateway cannot sign on its behalf.
+        Dangling proposals (no matching agreement yet) are therefore expected
+        and are resolved when the upstream sidecar later calls /receive_proposal
+        on us, or when a crawl/sync delivers the agreement.
+        """
         if self.gateway_node:
-            # v2: Create proper half-block proposal/agreement
+            # v2: Create a Proposal half-block representing our side of the call.
+            # The Agreement will be produced by the upstream sidecar out-of-band.
             transaction = {
                 "interaction_type": f"tool:{tool_name}",
                 "outcome": outcome,
@@ -177,7 +194,7 @@ class TrustChainMiddleware(Middleware):
                 )
                 self.gateway_node.invalidate_count_cache(upstream_pubkey)
                 logger.debug(
-                    "Recorded v2 half-block for tool:%s -> %s",
+                    "Recorded v2 proposal half-block for tool:%s -> %s",
                     tool_name,
                     upstream_pubkey[:16],
                 )

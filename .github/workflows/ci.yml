@@ -21,6 +21,8 @@ jobs:
         with:
           repository: viftode4/trustchain-sdk
           path: trustchain-sdk
+          # TODO: Pin to a tagged release (e.g., ref: v2.1.0) for stable CI
+          ref: master
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -46,6 +48,8 @@ jobs:
         with:
           repository: viftode4/trustchain-sdk
           path: trustchain-sdk
+          # TODO: Pin to a tagged release (e.g., ref: v2.1.0) for stable CI
+          ref: master
 
       - name: Set up Python
         uses: actions/setup-python@v5
