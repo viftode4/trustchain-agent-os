@@ -2,10 +2,28 @@
 
 v2: Added trustchain_crawl and trustchain_trust_score tools.
 When trust_engine is provided, uses v2 BlockStore-based data.
+
+Caller verification: Tools that accept a caller_pubkey also accept an optional
+caller_signature (hex) and caller_nonce (opaque string).  When both are present the
+server verifies that the caller actually owns the claimed key before processing the
+request.  Missing signature emits a deprecation warning (backward-compat); an invalid
+signature is rejected with an error.
+
+Signature scheme
+----------------
+  message  = f"{caller_pubkey}:{tool_name}:{caller_nonce}".encode("utf-8")
+  signature = identity.sign(message)           # returns raw 64-byte Ed25519 sig
+  caller_signature = signature.hex()           # hex-encoded, transmitted as string
+  caller_nonce     = str(int(time.time()))     # Unix timestamp string (recommended)
+
+The nonce prevents replay within the same second when a timestamp is used.
+Callers MAY use any non-empty opaque string as nonce; the server does not enforce
+time-bounds here (keep it simple — callers are responsible for freshness).
 """
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -13,7 +31,117 @@ if TYPE_CHECKING:
     from trustchain.store import RecordStore
     from trustchain.trust import TrustEngine
 
+from trustchain.identity import Identity
 from trustchain.trust import compute_chain_trust, compute_trust
+
+logger = logging.getLogger("trustchain.gateway.tools")
+
+
+# ---------------------------------------------------------------------------
+# Caller verification helper
+# ---------------------------------------------------------------------------
+
+def verify_caller(
+    pubkey: str,
+    signature: str,
+    nonce: str,
+    tool_name: str,
+) -> bool:
+    """Verify that the caller owns the Ed25519 key they claim.
+
+    Parameters
+    ----------
+    pubkey:
+        Hex-encoded 32-byte Ed25519 public key supplied by the caller.
+    signature:
+        Hex-encoded 64-byte Ed25519 signature over the challenge message.
+    nonce:
+        Caller-supplied nonce (opaque string; recommended: Unix timestamp).
+    tool_name:
+        The name of the MCP tool being called (bound into the message).
+
+    Returns
+    -------
+    True if the signature is valid, False otherwise.
+
+    The challenge message is:
+        ``f"{pubkey}:{tool_name}:{nonce}".encode("utf-8")``
+    """
+    try:
+        pubkey_bytes = bytes.fromhex(pubkey)
+        signature_bytes = bytes.fromhex(signature)
+    except (ValueError, AttributeError):
+        logger.warning(
+            "verify_caller: malformed pubkey or signature hex for tool '%s'", tool_name
+        )
+        return False
+
+    if len(pubkey_bytes) != 32:
+        logger.warning(
+            "verify_caller: pubkey must be 32 bytes, got %d for tool '%s'",
+            len(pubkey_bytes),
+            tool_name,
+        )
+        return False
+
+    if len(signature_bytes) != 64:
+        logger.warning(
+            "verify_caller: signature must be 64 bytes, got %d for tool '%s'",
+            len(signature_bytes),
+            tool_name,
+        )
+        return False
+
+    message = f"{pubkey}:{tool_name}:{nonce}".encode("utf-8")
+    return Identity.verify(message, signature_bytes, pubkey_bytes)
+
+
+def _check_caller_auth(
+    caller_pubkey: str,
+    caller_signature: str,
+    caller_nonce: str,
+    tool_name: str,
+) -> Optional[str]:
+    """Run caller verification and return an error string or None.
+
+    Returns None when verification passes (or is skipped due to missing sig).
+    Returns an error message string when an invalid signature is detected.
+    Emits a deprecation WARNING when signature is absent.
+    """
+    if not caller_pubkey:
+        return None  # No pubkey → nothing to verify
+
+    sig_present = bool(caller_signature and caller_signature.strip())
+    nonce_present = bool(caller_nonce and caller_nonce.strip())
+
+    if not sig_present:
+        logger.warning(
+            "[DEPRECATION] tool '%s' called with caller_pubkey='%s...' but no "
+            "caller_signature.  Future versions will require a signature.",
+            tool_name,
+            caller_pubkey[:16],
+        )
+        return None  # Backward compat — allow through
+
+    if not nonce_present:
+        logger.warning(
+            "[DEPRECATION] tool '%s' called with caller_signature but no caller_nonce; "
+            "replay protection is weakened.",
+            tool_name,
+        )
+
+    if not verify_caller(caller_pubkey, caller_signature, caller_nonce or "", tool_name):
+        return (
+            f"Caller verification failed for tool '{tool_name}': "
+            f"the signature does not match pubkey {caller_pubkey[:16]}... "
+            "Ensure you sign the message f\"{caller_pubkey}:{tool_name}:{caller_nonce}\" "
+            "with the Ed25519 private key that corresponds to caller_pubkey."
+        )
+
+    logger.debug(
+        "Caller verified for tool '%s': pubkey=%s...", tool_name, caller_pubkey[:16]
+    )
+    return None
 
 
 def register_trust_tools(
@@ -27,6 +155,9 @@ def register_trust_tools(
 
     v2: When trust_engine is provided, uses TrustEngine for scoring
     and BlockStore for data retrieval.
+
+    All tools accept optional caller identity parameters for challenge-response
+    verification.  See module docstring for the signature scheme.
     """
 
     def _get_trust(pubkey: str) -> float:
@@ -40,8 +171,23 @@ def register_trust_tools(
         return len(store.get_records_for(pubkey))
 
     @mcp.tool(name="trustchain_check_trust")
-    async def trustchain_check_trust(server_name: str) -> str:
-        """Check the current trust score for an upstream MCP server."""
+    async def trustchain_check_trust(
+        server_name: str,
+        caller_pubkey: str = "",
+        caller_signature: str = "",
+        caller_nonce: str = "",
+    ) -> str:
+        """Check the current trust score for an upstream MCP server.
+
+        caller_pubkey / caller_signature / caller_nonce are optional but
+        recommended — they let the gateway verify that the requesting agent
+        owns the key it claims to represent.
+        """
+        err = _check_caller_auth(
+            caller_pubkey, caller_signature, caller_nonce, "trustchain_check_trust"
+        )
+        if err:
+            return err
         identity = registry.identity_for(server_name)
         if identity is None:
             return f"Unknown server: {server_name}. Use trustchain_list_servers to see available servers."
@@ -65,8 +211,19 @@ def register_trust_tools(
         return "\n".join(lines)
 
     @mcp.tool(name="trustchain_get_history")
-    async def trustchain_get_history(server_name: str, limit: int = 10) -> str:
+    async def trustchain_get_history(
+        server_name: str,
+        limit: int = 10,
+        caller_pubkey: str = "",
+        caller_signature: str = "",
+        caller_nonce: str = "",
+    ) -> str:
         """Get recent interaction history with an upstream MCP server."""
+        err = _check_caller_auth(
+            caller_pubkey, caller_signature, caller_nonce, "trustchain_get_history"
+        )
+        if err:
+            return err
         identity = registry.identity_for(server_name)
         if identity is None:
             return f"Unknown server: {server_name}"
@@ -107,8 +264,17 @@ def register_trust_tools(
         return "\n".join(lines)
 
     @mcp.tool(name="trustchain_list_servers")
-    async def trustchain_list_servers() -> str:
+    async def trustchain_list_servers(
+        caller_pubkey: str = "",
+        caller_signature: str = "",
+        caller_nonce: str = "",
+    ) -> str:
         """List all upstream MCP servers and their current trust scores."""
+        err = _check_caller_auth(
+            caller_pubkey, caller_signature, caller_nonce, "trustchain_list_servers"
+        )
+        if err:
+            return err
         names = registry.server_names
         if not names:
             return "No upstream servers configured."
@@ -133,8 +299,18 @@ def register_trust_tools(
         return "\n".join(lines)
 
     @mcp.tool(name="trustchain_verify_chain")
-    async def trustchain_verify_chain(server_name: str) -> str:
+    async def trustchain_verify_chain(
+        server_name: str,
+        caller_pubkey: str = "",
+        caller_signature: str = "",
+        caller_nonce: str = "",
+    ) -> str:
         """Verify the blockchain integrity for an upstream MCP server."""
+        err = _check_caller_auth(
+            caller_pubkey, caller_signature, caller_nonce, "trustchain_verify_chain"
+        )
+        if err:
+            return err
         identity = registry.identity_for(server_name)
         if identity is None:
             return f"Unknown server: {server_name}. Use trustchain_list_servers to see available servers."
@@ -185,11 +361,21 @@ def register_trust_tools(
             )
 
     @mcp.tool(name="trustchain_crawl")
-    async def trustchain_crawl(server_name: str) -> str:
+    async def trustchain_crawl(
+        server_name: str,
+        caller_pubkey: str = "",
+        caller_signature: str = "",
+        caller_nonce: str = "",
+    ) -> str:
         """Crawl a server's TrustChain data to verify its history.
 
         v2: Uses BlockStore-based crawling if available.
         """
+        err = _check_caller_auth(
+            caller_pubkey, caller_signature, caller_nonce, "trustchain_crawl"
+        )
+        if err:
+            return err
         identity = registry.identity_for(server_name)
         if identity is None:
             return f"Unknown server: {server_name}"
@@ -243,11 +429,21 @@ def register_trust_tools(
             return "\n".join(lines)
 
     @mcp.tool(name="trustchain_trust_score")
-    async def trustchain_trust_score(server_name: str) -> str:
+    async def trustchain_trust_score(
+        server_name: str,
+        caller_pubkey: str = "",
+        caller_signature: str = "",
+        caller_nonce: str = "",
+    ) -> str:
         """Get detailed trust score breakdown for a server.
 
         v2: Shows chain integrity, netflow, and statistical components.
         """
+        err = _check_caller_auth(
+            caller_pubkey, caller_signature, caller_nonce, "trustchain_trust_score"
+        )
+        if err:
+            return err
         identity = registry.identity_for(server_name)
         if identity is None:
             return f"Unknown server: {server_name}"
