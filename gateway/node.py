@@ -110,7 +110,14 @@ class GatewayNode(TrustChainNode):
                 "error": f"Trust {trust_score:.3f} < threshold {min_trust:.3f}",
             }
 
-        proposal, agreement = await self.transact(peer_pubkey, transaction)
+        try:
+            proposal, agreement = await self.transact(peer_pubkey, transaction)
+        except (ValueError, ConnectionError, OSError) as exc:
+            return {
+                "accepted": False,
+                "trust_score": trust_score,
+                "error": str(exc),
+            }
         updated_trust = self.get_trust_score(peer_pubkey)
 
         return {
