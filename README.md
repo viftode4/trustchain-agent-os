@@ -153,6 +153,60 @@ adapter = ElizaOSTrustAdapter(agent_name="my-eliza-agent")
 result = await adapter.invoke({"message": "hello"})
 ```
 
+### Claude (Anthropic)
+
+```python
+from tc_frameworks.adapters.claude_agent_adapter import ClaudeAgentTrustAdapter
+
+adapter = ClaudeAgentTrustAdapter(agent_name="my-claude-agent")
+result = await adapter.invoke({"prompt": "summarize this document"})
+```
+
+### Smolagents
+
+```python
+from tc_frameworks.adapters.smolagents_adapter import SmolagentsTrustAdapter
+
+adapter = SmolagentsTrustAdapter(agent_name="my-smolagent")
+result = await adapter.invoke({"task": "search and summarize"})
+```
+
+### PydanticAI
+
+```python
+from tc_frameworks.adapters.pydantic_ai_adapter import PydanticAITrustAdapter
+
+adapter = PydanticAITrustAdapter(agent_name="my-pydantic-agent")
+result = await adapter.invoke({"query": "extract structured data"})
+```
+
+### Semantic Kernel
+
+```python
+from tc_frameworks.adapters.semantic_kernel_adapter import SemanticKernelTrustAdapter
+
+adapter = SemanticKernelTrustAdapter(agent_name="my-sk-agent")
+result = await adapter.invoke({"input": "generate a report"})
+```
+
+### Agno
+
+```python
+from tc_frameworks.adapters.agno_adapter import AgnoTrustAdapter
+
+adapter = AgnoTrustAdapter(agent_name="my-agno-agent")
+result = await adapter.invoke({"message": "run this workflow"})
+```
+
+### LlamaIndex
+
+```python
+from tc_frameworks.adapters.llamaindex_adapter import LlamaIndexTrustAdapter
+
+adapter = LlamaIndexTrustAdapter(agent_name="my-llama-agent")
+result = await adapter.invoke({"query": "query this knowledge base"})
+```
+
 All adapters are cached — the underlying agent/crew/graph is built once on first invocation and reused across calls.
 
 ## Architecture
@@ -253,10 +307,15 @@ pytest tests/ -v
 
 The CI pipeline checks out `trustchain-py` from its sibling repository before install.
 
+## Protocol
+
+Built on [draft-pouwelse-trustchain-01](https://datatracker.ietf.org/doc/draft-pouwelse-trustchain/) (Pouwelse, TU Delft, 2018). Trust computation and NetFlow Sybil resistance are specified in draft-viftode-trustchain-trust-00 (filed March 2026).
+
 ## Related Projects
 
-- [trustchain](https://github.com/viftode4/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 214 tests
-- [trustchain-py](https://github.com/viftode4/trustchain-py) — Python SDK: zero-config `trustchain.init()`, full protocol bindings, 174 tests
+- [trustchain](https://github.com/viftode4/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 296 tests
+- [trustchain-py](https://github.com/viftode4/trustchain-py) — Python SDK: zero-config `trustchain.init()`, full protocol bindings, 311 tests
+- [trustchain-js](https://github.com/viftode4/trustchain-js) — TypeScript SDK: zero runtime deps, binary auto-download, 126 tests
 
 ## License
 
