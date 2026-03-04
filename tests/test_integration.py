@@ -783,9 +783,10 @@ class TestTrustScoreTool:
                 "trustchain_trust_score", {"server_name": "srv"}
             )
             text = result.content[0].text
-            assert "Combined Trust" in text
-            assert "Chain Integrity" in text
-            assert "NetFlow Score" in text
+            assert "Trust Score" in text
+            assert "Connectivity" in text
+            assert "Integrity" in text
+            assert "Diversity" in text
 
 
 # ---------------------------------------------------------------------------

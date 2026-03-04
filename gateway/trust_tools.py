@@ -193,19 +193,36 @@ def register_trust_tools(
             return f"Unknown server: {server_name}. Use trustchain_list_servers to see available servers."
 
         pubkey = identity.pubkey_hex
-        trust = _get_trust(pubkey)
         interaction_count = _get_interaction_count(pubkey)
         threshold = registry.threshold_for(server_name)
         is_bootstrap = interaction_count < bootstrap_interactions
 
-        lines = [
-            f"Server: {server_name}",
-            f"Trust Score: {trust:.3f}",
-            f"Threshold: {threshold:.3f}",
-            f"Interactions: {interaction_count}",
-            f"Status: {'bootstrap (always allowed)' if is_bootstrap else 'established'}",
-            f"Public Key: {pubkey[:16]}...",
-        ]
+        # Use evidence-based output when TrustEngine is available
+        if trust_engine:
+            evidence = trust_engine.compute_trust_with_evidence(pubkey)
+            trust = evidence["trust_score"]
+            lines = [
+                f"Server: {server_name}",
+                f"Trust Score: {trust:.3f}",
+                f"  Connectivity: {evidence['connectivity']:.3f}",
+                f"  Integrity: {evidence['integrity']:.3f}",
+                f"  Diversity: {evidence['diversity']:.3f}",
+                f"Unique Peers: {evidence['unique_peers']}",
+                f"Interactions: {interaction_count}",
+                f"Threshold: {threshold:.3f}",
+                f"Status: {'bootstrap (always allowed)' if is_bootstrap else 'established'}",
+                f"Public Key: {pubkey[:16]}...",
+            ]
+        else:
+            trust = _get_trust(pubkey)
+            lines = [
+                f"Server: {server_name}",
+                f"Trust Score: {trust:.3f}",
+                f"Threshold: {threshold:.3f}",
+                f"Interactions: {interaction_count}",
+                f"Status: {'bootstrap (always allowed)' if is_bootstrap else 'established'}",
+                f"Public Key: {pubkey[:16]}...",
+            ]
         if not is_bootstrap and trust < threshold:
             lines.append("WARNING: Trust is below threshold — future calls may be blocked")
         return "\n".join(lines)
@@ -319,15 +336,14 @@ def register_trust_tools(
 
         # v2: Use TrustEngine chain integrity
         if trust_engine:
-            integrity = trust_engine.compute_chain_integrity(pubkey)
+            evidence = trust_engine.compute_trust_with_evidence(pubkey)
             chain_length = trust_engine.store.get_latest_seq(pubkey)
-            combined = trust_engine.compute_trust(pubkey)
-            status = "VALID" if integrity >= 1.0 else "INTEGRITY ISSUES"
+            status = "VALID" if evidence["integrity"] >= 1.0 else "INTEGRITY ISSUES"
             return (
                 f"Server: {server_name}\n"
                 f"Chain Length: {chain_length}\n"
-                f"Chain Integrity: {integrity:.3f}\n"
-                f"Combined Trust: {combined:.3f}\n"
+                f"Chain Integrity: {evidence['integrity']:.3f}\n"
+                f"Trust Score: {evidence['trust_score']:.3f}\n"
                 f"Status: {status}"
             )
 
@@ -451,14 +467,16 @@ def register_trust_tools(
         pubkey = identity.pubkey_hex
 
         if trust_engine:
-            integrity = trust_engine.compute_chain_integrity(pubkey)
-            netflow = trust_engine.compute_netflow_score(pubkey)
-            combined = trust_engine.compute_trust(pubkey)
+            evidence = trust_engine.compute_trust_with_evidence(pubkey)
             lines = [
                 f"Server: {server_name}",
-                f"Combined Trust: {combined:.3f}",
-                f"  Chain Integrity: {integrity:.3f} (weight: 0.5)",
-                f"  NetFlow Score: {netflow:.3f} (weight: 0.5)",
+                f"Trust Score: {evidence['trust_score']:.3f}",
+                f"  Connectivity: {evidence['connectivity']:.3f} (path_diversity → capped at 1.0)",
+                f"  Integrity: {evidence['integrity']:.3f} (chain hash/sig verification)",
+                f"  Diversity: {evidence['diversity']:.3f} (unique peers → capped at 1.0)",
+                f"Unique Peers: {evidence['unique_peers']}",
+                f"Interactions: {evidence['interactions']}",
+                f"Fraud: {evidence['fraud']}",
             ]
         else:
             trust = compute_trust(pubkey, store)
