@@ -307,6 +307,12 @@ pytest tests/ -v
 
 The CI pipeline checks out `trustchain-py` from its sibling repository before install.
 
+## Public Seed Node
+
+A public seed node is running at `http://5.161.255.238:8202`. It is the default bootstrap peer in `trustchain-py` — agents connect automatically without any configuration.
+
+> Early-access: not production-scale yet. Will be replaced with a domain and additional nodes as the network grows.
+
 ## Protocol
 
 Built on [draft-pouwelse-trustchain-01](https://datatracker.ietf.org/doc/draft-pouwelse-trustchain/) (Pouwelse, TU Delft, 2018). Trust computation and NetFlow Sybil resistance are specified in draft-viftode-trustchain-trust-00 (filed March 2026).
