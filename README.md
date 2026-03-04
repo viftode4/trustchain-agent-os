@@ -321,7 +321,7 @@ Built on [draft-pouwelse-trustchain-01](https://datatracker.ietf.org/doc/draft-p
 
 - [trustchain](https://github.com/viftode4/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 296 tests
 - [trustchain-py](https://github.com/viftode4/trustchain-py) — Python SDK: zero-config `trustchain.init()`, full protocol bindings, 311 tests
-- [trustchain-js](https://github.com/viftode4/trustchain-js) — TypeScript SDK: zero runtime deps, binary auto-download, 126 tests
+- [trustchain-js](https://github.com/viftode4/trustchain-js) — TypeScript SDK: `npm install @trustchain/sdk`, zero runtime deps, 126 tests
 
 ## License
 
