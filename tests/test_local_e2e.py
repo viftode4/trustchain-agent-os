@@ -128,8 +128,8 @@ class SidecarProcess:
 
         self._process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             env=env,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
