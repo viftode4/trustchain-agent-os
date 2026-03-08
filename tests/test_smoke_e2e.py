@@ -886,3 +886,210 @@ class TestElizaOSAdapter:
             if name != "ElizaOS":
                 adapter = cls()
                 assert adapter.is_python_native is True, f"{name} should be Python-native"
+
+
+# ============================================================================
+# Helpers: v2 gateway stack with audit support
+# ============================================================================
+
+
+def _make_v2_gateway_stack(threshold=0.0, bootstrap=3, audit_level="standard"):
+    """Wire a full v2 gateway stack with GatewayNode and audit support."""
+    store = RecordStore()
+    gw_identity = Identity()
+    block_store = MemoryBlockStore()
+    registry = UpstreamRegistry(gw_identity)
+    recorder = InteractionRecorder(gw_identity, store)
+    gateway_node = GatewayNode(
+        identity=gw_identity,
+        store=block_store,
+        seed_nodes=[gw_identity.pubkey_hex],
+    )
+    middleware = TrustChainMiddleware(
+        registry=registry,
+        recorder=recorder,
+        store=store,
+        default_threshold=threshold,
+        bootstrap_interactions=bootstrap,
+        trust_engine=gateway_node.trust_engine,
+        gateway_node=gateway_node,
+        audit_level=audit_level,
+    )
+    return middleware, registry, gw_identity, gateway_node
+
+
+def _register_no_identity_upstream(registry, name, tools):
+    """Register an upstream server and then remove its identity (single-player mode)."""
+    upstream = _register_mock_upstream(registry, name, tools)
+    registry._server_identities.pop(name, None)
+    return upstream
+
+
+# ============================================================================
+# E2E: Audit fallback (single-player mode)
+# ============================================================================
+
+
+class TestAuditFallbackE2E:
+    """End-to-end tests for single-player audit fallback through the full stack."""
+
+    @pytest.mark.asyncio
+    async def test_single_player_audit_block_created(self):
+        """Register upstream, remove its identity -> tool call succeeds, audit block stored."""
+        middleware, registry, gw_identity, gateway_node = _make_v2_gateway_stack()
+        _register_no_identity_upstream(registry, "AuditSvc", ["audit_op"])
+
+        result = await _call_tool(middleware, "audit_op")
+
+        assert "mode=audit-only" in result
+        assert "outcome=completed" in result
+
+        # Verify audit block in GatewayNode's block store
+        chain = gateway_node.protocol.store.get_chain(gw_identity.pubkey_hex)
+        assert len(chain) == 1
+        block = chain[0]
+        assert block.block_type.value == "audit"
+        assert block.transaction["action"] == "tool:audit_op"
+        assert block.transaction["outcome"] == "completed"
+        assert block.public_key == gw_identity.pubkey_hex
+
+    @pytest.mark.asyncio
+    async def test_single_player_chain_integrity(self):
+        """5 audit-only calls -> validate_chain() passes, sequence 1..5 contiguous."""
+        middleware, registry, gw_identity, gateway_node = _make_v2_gateway_stack()
+        _register_no_identity_upstream(registry, "ChainSvc", ["chain_op"])
+
+        for i in range(5):
+            result = await _call_tool(middleware, "chain_op", {"i": i})
+            assert "mode=audit-only" in result
+
+        # Chain integrity
+        pubkey = gw_identity.pubkey_hex
+        assert gateway_node.protocol.validate_chain(pubkey) is True
+
+        # Verify contiguous sequences 1..5
+        chain = gateway_node.protocol.store.get_chain(pubkey)
+        assert len(chain) == 5
+        for i, block in enumerate(chain):
+            assert block.sequence_number == i + 1
+
+    @pytest.mark.asyncio
+    async def test_mixed_bilateral_and_audit_chain(self):
+        """Server A has identity (bilateral), Server B lacks identity (audit) -> valid chain."""
+        middleware, registry, gw_identity, gateway_node = _make_v2_gateway_stack()
+
+        # Server A: bilateral (has identity)
+        _register_mock_upstream(registry, "BilateralSvc", ["bilateral_op"])
+        # Server B: audit-only (no identity)
+        _register_no_identity_upstream(registry, "AuditSvc", ["audit_op"])
+
+        # Interleave calls: bilateral, audit, bilateral, audit
+        for _ in range(2):
+            r1 = await _call_tool(middleware, "bilateral_op")
+            assert "outcome=completed" in r1
+            assert "mode=audit-only" not in r1  # bilateral path
+
+            r2 = await _call_tool(middleware, "audit_op")
+            assert "mode=audit-only" in r2
+
+        # Full chain should be valid (4 blocks: 2 proposals + 2 audits)
+        pubkey = gw_identity.pubkey_hex
+        assert gateway_node.protocol.validate_chain(pubkey) is True
+
+        chain = gateway_node.protocol.store.get_chain(pubkey)
+        assert len(chain) == 4
+        block_types = [b.block_type.value for b in chain]
+        assert block_types.count("proposal") == 2
+        assert block_types.count("audit") == 2
+
+    @pytest.mark.asyncio
+    async def test_audit_fallback_on_bilateral_failure_e2e(self):
+        """create_proposal raises mid-call -> audit block as fallback, chain still valid."""
+        middleware, registry, gw_identity, gateway_node = _make_v2_gateway_stack()
+        _register_mock_upstream(registry, "FlakyBilateral", ["flaky_op"])
+
+        # Make create_proposal fail
+        from unittest.mock import MagicMock
+        gateway_node.protocol.create_proposal = MagicMock(
+            side_effect=ValueError("store full")
+        )
+
+        result = await _call_tool(middleware, "flaky_op")
+        # Call should still succeed (error resilience)
+        assert "outcome=completed" in result
+
+        # Should have an audit fallback block
+        chain = gateway_node.protocol.store.get_chain(gw_identity.pubkey_hex)
+        audit_blocks = [b for b in chain if b.block_type.value == "audit"]
+        assert len(audit_blocks) == 1
+        assert audit_blocks[0].transaction["fallback_reason"] == "store full"
+
+        # Chain is still valid
+        assert gateway_node.protocol.validate_chain(gw_identity.pubkey_hex) is True
+
+    @pytest.mark.asyncio
+    async def test_all_frameworks_single_player_mode(self):
+        """All 6 mock frameworks with identities removed -> audit-only, audit blocks match."""
+        middleware, registry, gw_identity, gateway_node = _make_v2_gateway_stack()
+
+        all_tools = []
+        for name, _, tools in ALL_MOCKS:
+            _register_no_identity_upstream(registry, name, tools)
+            all_tools.extend(tools)
+
+        # Call one tool from each framework
+        for name, _, tools in ALL_MOCKS:
+            result = await _call_tool(middleware, tools[0])
+            assert "mode=audit-only" in result, f"{name} missing audit-only annotation"
+            assert "outcome=completed" in result
+
+        # Audit blocks should match framework count (6 calls, one per framework)
+        chain = gateway_node.protocol.store.get_chain(gw_identity.pubkey_hex)
+        audit_blocks = [b for b in chain if b.block_type.value == "audit"]
+        assert len(audit_blocks) == 6
+
+    @pytest.mark.asyncio
+    async def test_stress_50_audit_calls(self):
+        """50 rapid audit-only calls -> 50 audit blocks, chain validates, no seq gaps."""
+        middleware, registry, gw_identity, gateway_node = _make_v2_gateway_stack()
+        _register_no_identity_upstream(registry, "StressSvc", ["stress_op"])
+
+        for i in range(50):
+            result = await _call_tool(middleware, "stress_op", {"i": i})
+            assert "mode=audit-only" in result
+
+        pubkey = gw_identity.pubkey_hex
+        chain = gateway_node.protocol.store.get_chain(pubkey)
+        assert len(chain) == 50
+
+        # No sequence gaps
+        for i, block in enumerate(chain):
+            assert block.sequence_number == i + 1, f"Gap at seq {i+1}"
+
+        # Full chain validation
+        assert gateway_node.protocol.validate_chain(pubkey) is True
+
+    @pytest.mark.asyncio
+    async def test_audit_level_comprehensive_records_all(self):
+        """comprehensive records audit blocks; minimal still records tool_call events."""
+        # Comprehensive
+        mw_comp, reg_comp, id_comp, gn_comp = _make_v2_gateway_stack(
+            audit_level="comprehensive"
+        )
+        _register_no_identity_upstream(reg_comp, "CompSvc", ["comp_op"])
+        await _call_tool(mw_comp, "comp_op")
+
+        chain_comp = gn_comp.protocol.store.get_chain(id_comp.pubkey_hex)
+        assert len(chain_comp) == 1
+        assert chain_comp[0].block_type.value == "audit"
+
+        # Minimal — tool_call is always included so audit block is still created
+        mw_min, reg_min, id_min, gn_min = _make_v2_gateway_stack(
+            audit_level="minimal"
+        )
+        _register_no_identity_upstream(reg_min, "MinSvc", ["min_op"])
+        await _call_tool(mw_min, "min_op")
+
+        chain_min = gn_min.protocol.store.get_chain(id_min.pubkey_hex)
+        assert len(chain_min) == 1
+        assert chain_min[0].transaction["event_type"] == "tool_call"

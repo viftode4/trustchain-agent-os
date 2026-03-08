@@ -93,6 +93,7 @@ def create_gateway(
         bootstrap_interactions=config.bootstrap_interactions,
         trust_engine=trust_engine,
         gateway_node=gateway_node,
+        audit_level=config.audit_level,
     )
     mcp.add_middleware(middleware)
 
@@ -170,5 +171,6 @@ def create_gateway_from_dict(config_dict: dict) -> FastMCP:
         bootstrap_interactions=config_dict.get("bootstrap_interactions", 3),
         server_name=config_dict.get("server_name", "TrustChain Gateway"),
         use_v2=config_dict.get("use_v2", False),
+        audit_level=config_dict.get("audit_level", "standard"),
     )
     return create_gateway(config)

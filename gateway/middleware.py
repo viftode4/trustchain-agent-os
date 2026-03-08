@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Optional
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.exceptions import ToolError
 
+from trustchain.audit import AuditLevel, EventType, default_events
 from trustchain.trust import compute_trust
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ class TrustChainMiddleware(Middleware):
         bootstrap_interactions: int = 3,
         trust_engine: Optional[TrustEngine] = None,
         gateway_node: Optional[GatewayNode] = None,
+        audit_level: str = "standard",
     ):
         self.registry = registry
         self.recorder = recorder
@@ -59,6 +61,8 @@ class TrustChainMiddleware(Middleware):
         self.bootstrap_interactions = bootstrap_interactions
         self.trust_engine = trust_engine
         self.gateway_node = gateway_node
+        self.audit_level = AuditLevel(audit_level)
+        self._audit_events = default_events(self.audit_level)
 
     def _is_native_tool(self, tool_name: str) -> bool:
         """Check if a tool is a gateway-native trust tool (skip gating)."""
@@ -99,7 +103,7 @@ class TrustChainMiddleware(Middleware):
 
         upstream_identity = self.registry.identity_for(server_name)
         if upstream_identity is None:
-            raise ToolError(f"No identity registered for upstream server '{server_name}'")
+            return await self._audit_only_call(context, call_next, server_name, tool_name)
 
         upstream_pubkey = upstream_identity.pubkey_hex
 
@@ -200,6 +204,7 @@ class TrustChainMiddleware(Middleware):
                 )
             except Exception as e:
                 logger.warning("Failed to create v2 half-block: %s", e)
+                self._record_audit(tool_name=tool_name, outcome=outcome, fallback_reason=str(e))
         else:
             # v1: Use the InteractionRecorder
             self.recorder.record(
@@ -207,6 +212,57 @@ class TrustChainMiddleware(Middleware):
                 interaction_type=f"tool:{tool_name}",
                 outcome=outcome,
             )
+
+
+    async def _audit_only_call(self, context, call_next, server_name: str, tool_name: str):
+        """Handle tool calls when no peer identity exists (single-player mode).
+
+        Forwards the call without trust gating, records an audit block instead
+        of a bilateral proposal.  Never raises into the agent call path.
+        """
+        outcome = "completed"
+        error_msg = ""
+        try:
+            result = await call_next(context)
+        except Exception as exc:
+            outcome = "failed"
+            error_msg = str(exc)
+            self._record_audit(tool_name=tool_name, outcome=outcome, error=error_msg)
+            raise
+
+        self._record_audit(tool_name=tool_name, outcome=outcome)
+
+        annotation = (
+            f"\n\n[TrustChain] server={server_name} mode=audit-only outcome={outcome}"
+        )
+        result = _append_to_result(result, annotation)
+        return result
+
+    def _record_audit(
+        self,
+        tool_name: str,
+        outcome: str,
+        error: str = "",
+        fallback_reason: str = "",
+    ) -> None:
+        """Best-effort audit block creation.  Never raises."""
+        if EventType.TOOL_CALL not in self._audit_events:
+            return
+        if not self.gateway_node:
+            return  # v1 mode has no protocol for audit blocks
+        transaction: dict = {
+            "event_type": "tool_call",
+            "action": f"tool:{tool_name}",
+            "outcome": outcome,
+        }
+        if error:
+            transaction["error"] = error
+        if fallback_reason:
+            transaction["fallback_reason"] = fallback_reason
+        try:
+            self.gateway_node.protocol.create_audit(transaction)
+        except Exception as e:
+            logger.warning("Failed to create audit block: %s", e)
 
 
 def _append_to_result(result, annotation: str):

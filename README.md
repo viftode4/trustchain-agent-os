@@ -6,7 +6,7 @@
 
 **Trust-native protocol layer for AI agents.**
 
-Every agent protocol (MCP, A2A, ACP, ANP) handles communication. None handle trust. TrustChain Agent OS is the missing layer underneath all of them — a gateway and a set of framework adapters that bring bilateral signed interaction records, NetFlow Sybil resistance, and automatic trust scoring to 12 major agent frameworks. 205 tests.
+Every agent protocol (MCP, A2A, ACP, ANP) handles communication. None handle trust. TrustChain Agent OS is the missing layer underneath all of them — a gateway and a set of framework adapters that bring bilateral signed interaction records, MeritRank Sybil resistance, and automatic trust scoring to 12 major agent frameworks. 222 tests.
 
 > **[Read the full TrustChain overview →](docs/TRUSTCHAIN-OVERVIEW.md)** — what it is, how it works, and why it matters.
 
@@ -20,6 +20,7 @@ Built on [trustchain-py](https://github.com/viftode4/trustchain-py) and the [tru
 - **TrustAgent primitive** — lightweight agent abstraction with built-in identity, trust tracking, and service registry
 - **Automatic trust accumulation** — interaction history builds over time; trust scores improve as parties transact honestly
 - **Fraud resistance** — double-spend detection and hard-zero scoring propagate across the interaction graph
+- **Single-player audit mode** — when no TrustChain-aware peer exists, the gateway falls back to self-signed audit blocks as a cryptographic audit log (agent black box recorder); configurable via `audit_level` (minimal / standard / comprehensive)
 
 ## Installation
 
@@ -93,7 +94,7 @@ pip install trustchain-agent-os[gateway]
 uvicorn gateway.server:app --port 8080
 ```
 
-Every tool call arriving at the gateway is checked against the caller's trust score. The result is recorded as a bilateral interaction block, building the caller's trust history over time.
+Every tool call arriving at the gateway is checked against the caller's trust score. The result is recorded as a bilateral interaction block, building the caller's trust history over time. When an upstream server has no TrustChain identity, the gateway automatically switches to **audit-only mode** — the call proceeds and is recorded as a self-signed audit block.
 
 ## Framework Adapters
 
@@ -241,7 +242,7 @@ trustchain-agent-os/
 │
 ├── gateway/
 │   ├── server.py         FastAPI application factory (create_gateway)
-│   ├── middleware.py     Trust enforcement middleware
+│   ├── middleware.py     Trust enforcement middleware + audit fallback
 │   ├── recorder.py       Bilateral interaction recording
 │   ├── registry.py       Peer and upstream server registry
 │   ├── node.py           TrustChain node lifecycle management
@@ -319,7 +320,7 @@ Built on [draft-pouwelse-trustchain-01](https://datatracker.ietf.org/doc/draft-p
 
 ## Related Projects
 
-- [trustchain](https://github.com/viftode4/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 296 tests
+- [trustchain](https://github.com/viftode4/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 304 tests
 - [trustchain-py](https://github.com/viftode4/trustchain-py) — Python SDK: zero-config `trustchain.init()`, full protocol bindings, 311 tests
 - [trustchain-js](https://github.com/viftode4/trustchain-js) — TypeScript SDK: `npm install @trustchain/sdk`, zero runtime deps, 126 tests
 

@@ -36,3 +36,4 @@ class GatewayConfig:
     bootstrap_interactions: int = 3
     server_name: str = "TrustChain Gateway"
     use_v2: bool = False  # Use GatewayNode with half-block protocol
+    audit_level: str = "standard"
