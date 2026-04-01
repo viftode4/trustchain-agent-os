@@ -33,11 +33,13 @@ class ClaudeAgentAdapter(FrameworkAdapter):
         instructions: str = "You are a helpful assistant.",
         max_tokens: int = 1024,
         api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
     ):
         self.model = model
         self.instructions = instructions
         self.max_tokens = max_tokens
         self.api_key = api_key
+        self.base_url = base_url
         self._client = None  # Cached client instance
 
     def _build_client(self):
@@ -47,6 +49,8 @@ class ClaudeAgentAdapter(FrameworkAdapter):
         kwargs: Dict[str, Any] = {}
         if self.api_key:
             kwargs["api_key"] = self.api_key
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
         return anthropic.Anthropic(**kwargs)
 
     def create_mcp_server(self) -> FastMCP:

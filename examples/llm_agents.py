@@ -10,7 +10,8 @@ Two Claude-backed agents: a "researcher" and a "coder".
 The researcher also has a trust-gated "critique" service that the coder
 can only call after building enough reputation.
 
-Run: ANTHROPIC_API_KEY=sk-... python examples/llm_agents.py
+Run: python examples/llm_agents.py
+     (uses local Claude API proxy at http://127.0.0.1:8082)
 """
 import asyncio
 import os
@@ -22,13 +23,10 @@ from agent_os import TrustAgent, TrustContext
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 
-api_key = os.environ.get("ANTHROPIC_API_KEY")
-if not api_key:
-    print("Error: ANTHROPIC_API_KEY not set.")
-    print("  export ANTHROPIC_API_KEY=sk-ant-...")
-    sys.exit(1)
+PROXY_URL = os.environ.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8082")
+MODEL = os.environ.get("CLAUDE_MODEL", "haiku")
 
-claude = anthropic.Anthropic(api_key=api_key)
+claude = anthropic.Anthropic(api_key="proxy", base_url=PROXY_URL)
 
 researcher = TrustAgent(name="researcher")
 coder      = TrustAgent(name="coder")
@@ -51,7 +49,7 @@ TASKS = [
 async def answer_handler(data: dict, ctx: TrustContext) -> dict:
     question = data.get("question", "")
     response = claude.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=MODEL,
         max_tokens=256,
         messages=[
             {
@@ -69,7 +67,7 @@ async def answer_handler(data: dict, ctx: TrustContext) -> dict:
 async def critique_handler(data: dict, ctx: TrustContext) -> dict:
     answer = data.get("answer", "")
     response = claude.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=MODEL,
         max_tokens=128,
         messages=[
             {
@@ -88,7 +86,7 @@ async def critique_handler(data: dict, ctx: TrustContext) -> dict:
 async def main():
     print("LLM Agent Trust Demo")
     print("=" * 65)
-    print("researcher asks → coder answers (via Claude)")
+    print("researcher asks -> coder answers (via Claude)")
     print("trust recorded on every exchange")
     print()
 

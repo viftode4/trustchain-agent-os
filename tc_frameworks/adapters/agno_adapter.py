@@ -37,6 +37,7 @@ class AgnoAdapter(FrameworkAdapter):
         instructions: str = "You are a helpful assistant.",
         tools: Optional[List] = None,
         api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
     ):
         self.agent_name = agent_name
         self.model_provider = model_provider
@@ -44,6 +45,7 @@ class AgnoAdapter(FrameworkAdapter):
         self.instructions = instructions
         self.tools = tools or []
         self.api_key = api_key
+        self.base_url = base_url
         self._agent = None  # Cached agent instance
 
     def _build_agent(self):
@@ -53,6 +55,18 @@ class AgnoAdapter(FrameworkAdapter):
         if self.model_provider == "google":
             from agno.models.google import Gemini
             model = Gemini(id=self.model_id, api_key=self.api_key)
+        elif self.model_provider == "anthropic":
+            from agno.models.anthropic import Claude
+            kwargs: Dict[str, Any] = {"id": self.model_id}
+            if self.api_key:
+                kwargs["api_key"] = self.api_key
+            if self.base_url:
+                import anthropic
+                kwargs["client"] = anthropic.Anthropic(
+                    api_key=self.api_key or "proxy",
+                    base_url=self.base_url,
+                )
+            model = Claude(**kwargs)
         else:
             from agno.models.openai import OpenAIChat
             model = OpenAIChat(id=self.model_id, api_key=self.api_key)

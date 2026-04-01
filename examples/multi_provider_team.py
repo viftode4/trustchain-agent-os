@@ -14,8 +14,8 @@ Trust gates enforce progressive unlocking:
   - Analysis/Writing: needs trust (min_trust=0.2)
   - Review: needs established trust (min_trust=0.4)
 
-Run: GEMINI_API_KEY=... ANTHROPIC_API_KEY=... python examples/multi_provider_team.py
-     (ANTHROPIC_API_KEY is optional — writer falls back to Gemini via PydanticAI)
+Run: python examples/multi_provider_team.py
+     (uses local Claude API proxy at http://127.0.0.1:8082)
 """
 import asyncio
 import os
@@ -25,40 +25,37 @@ from agent_os import TrustAgent, TrustContext
 
 # ── API setup ────────────────────────────────────────────────────────────────
 
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_KEY:
-    print("Error: GEMINI_API_KEY not set.")
-    print("  export GEMINI_API_KEY=your-key-here")
-    sys.exit(1)
+PROXY_URL = os.environ.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8082")
+MODEL = os.environ.get("CLAUDE_MODEL", "haiku")
 
-os.environ["GOOGLE_API_KEY"] = GEMINI_KEY
-MODEL = "gemini-2.5-flash"
-
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
+# litellm-based frameworks read these env vars
+os.environ.setdefault("ANTHROPIC_API_KEY", "proxy")
+os.environ.setdefault("ANTHROPIC_API_BASE", PROXY_URL)
+os.environ.setdefault("ANTHROPIC_BASE_URL", PROXY_URL)
 
 # ── Build real framework agents ──────────────────────────────────────────────
 
 print("Multi-Provider Agent Team Demo")
 print("=" * 70)
-print(f"LLM backend: Gemini ({MODEL}) + Claude (if key available)")
+print(f"LLM backend: Claude ({MODEL}) via proxy at {PROXY_URL}")
 print()
 print("Loading framework agents...")
 
-# 1. Coordinator — Google ADK
+# 1. Coordinator — Claude (Anthropic)
 coordinator = TrustAgent(name="coordinator")
-coordinator_fw = "Google ADK"
+coordinator_fw = "Claude (Anthropic)"
 try:
-    from tc_frameworks.adapters.google_adk_adapter import GoogleADKAdapter
-    _coord_adapter = GoogleADKAdapter(
-        agent_name="coordinator", model=MODEL,
-        instruction="You are a project coordinator. Create brief, actionable research plans. "
-                    "Keep responses to 3-4 sentences maximum.",
+    from tc_frameworks.adapters.claude_agent_adapter import ClaudeAgentAdapter
+    _coord_adapter = ClaudeAgentAdapter(
+        model=MODEL, base_url=PROXY_URL, api_key="proxy",
+        instructions="You are a project coordinator. Create brief, actionable research plans. "
+                     "Keep responses to 3-4 sentences maximum.",
     )
     _coord_mcp = _coord_adapter.create_mcp_server()
-    print(f"  coordinator:  Google ADK ........... LOADED")
+    print(f"  coordinator:  Claude (Anthropic) ... LOADED")
 except Exception as e:
     _coord_adapter = None
-    print(f"  coordinator:  Google ADK ........... SKIP ({e})")
+    print(f"  coordinator:  Claude (Anthropic) ... SKIP ({e})")
 
 # 2. Researcher — LangGraph
 researcher = TrustAgent(name="researcher")
@@ -66,7 +63,8 @@ researcher_fw = "LangGraph"
 try:
     from tc_frameworks.adapters.langgraph_adapter import LangGraphAdapter
     _research_adapter = LangGraphAdapter(
-        model_name=MODEL, model_provider="google", api_key=GEMINI_KEY,
+        model_name=MODEL, model_provider="anthropic",
+        api_key="proxy", base_url=PROXY_URL,
     )
     _research_mcp = _research_adapter.create_mcp_server()
     print(f"  researcher:   LangGraph ............ LOADED")
@@ -80,7 +78,7 @@ analyst_fw = "PydanticAI"
 try:
     from tc_frameworks.adapters.pydantic_ai_adapter import PydanticAIAdapter
     _analyst_adapter = PydanticAIAdapter(
-        model=f"google-gla:{MODEL}",
+        model=f"anthropic:{MODEL}",
         system_prompt="You are a data analyst. Identify patterns, draw conclusions, "
                       "and make recommendations. Be concise: 3-4 sentences.",
     )
@@ -90,50 +88,34 @@ except Exception as e:
     _analyst_adapter = None
     print(f"  analyst:      PydanticAI ........... SKIP ({e})")
 
-# 4. Writer — Anthropic Claude (falls back to PydanticAI+Gemini)
+# 4. Writer — Claude via proxy
 writer = TrustAgent(name="writer")
-if ANTHROPIC_KEY:
-    writer_fw = "Claude (Anthropic)"
-    try:
-        from tc_frameworks.adapters.claude_agent_adapter import ClaudeAgentAdapter
-        _writer_adapter = ClaudeAgentAdapter(
-            model="claude-haiku-4-5-20251001",
-            instructions="You are a technical writer. Write clear, structured summaries. "
-                         "Keep responses to 4-5 sentences maximum.",
-            api_key=ANTHROPIC_KEY,
-        )
-        _writer_mcp = _writer_adapter.create_mcp_server()
-        print(f"  writer:       Claude (Anthropic) ... LOADED")
-    except Exception as e:
-        _writer_adapter = None
-        print(f"  writer:       Claude (Anthropic) ... SKIP ({e})")
-else:
-    writer_fw = "PydanticAI (Gemini)"
-    try:
-        _writer_adapter = PydanticAIAdapter(
-            model=f"google-gla:{MODEL}",
-            system_prompt="You are a technical writer. Write clear, structured summaries. "
-                          "Keep responses to 4-5 sentences maximum.",
-        )
-        _writer_mcp = _writer_adapter.create_mcp_server()
-        print(f"  writer:       PydanticAI (Gemini) .. LOADED (no ANTHROPIC_API_KEY)")
-    except Exception as e:
-        _writer_adapter = None
-        print(f"  writer:       PydanticAI fallback .. SKIP ({e})")
-
-# 5. Reviewer — Semantic Kernel
-reviewer = TrustAgent(name="reviewer")
-reviewer_fw = "Semantic Kernel"
+writer_fw = "Claude (Writer)"
 try:
-    from tc_frameworks.adapters.semantic_kernel_adapter import SemanticKernelAdapter
-    _reviewer_adapter = SemanticKernelAdapter(
-        service_id="chat", model=MODEL, provider="google", api_key=GEMINI_KEY,
+    _writer_adapter = ClaudeAgentAdapter(
+        model=MODEL, base_url=PROXY_URL, api_key="proxy",
+        instructions="You are a technical writer. Write clear, structured summaries. "
+                     "Keep responses to 4-5 sentences maximum.",
+    )
+    _writer_mcp = _writer_adapter.create_mcp_server()
+    print(f"  writer:       Claude (Writer) ...... LOADED")
+except Exception as e:
+    _writer_adapter = None
+    print(f"  writer:       Claude (Writer) ...... SKIP ({e})")
+
+# 5. Reviewer — Smolagents via litellm
+reviewer = TrustAgent(name="reviewer")
+reviewer_fw = "Smolagents"
+try:
+    from tc_frameworks.adapters.smolagents_adapter import SmolagentsAdapter
+    _reviewer_adapter = SmolagentsAdapter(
+        model_id=f"anthropic/{MODEL}", model_type="litellm",
     )
     _reviewer_mcp = _reviewer_adapter.create_mcp_server()
-    print(f"  reviewer:     Semantic Kernel ...... LOADED")
+    print(f"  reviewer:     Smolagents ........... LOADED")
 except Exception as e:
     _reviewer_adapter = None
-    print(f"  reviewer:     Semantic Kernel ...... SKIP ({e})")
+    print(f"  reviewer:     Smolagents ........... SKIP ({e})")
 
 AGENTS = [
     (coordinator, coordinator_fw),
@@ -304,7 +286,7 @@ async def main():
               f"{score:.3f} {bar:<30} ({interactions} interactions)")
 
     print()
-    print("5 different frameworks. 1 bilateral trust ledger.")
+    print("Multiple frameworks. 1 bilateral trust ledger. 1 Claude proxy.")
     print("TrustChain doesn't care which framework built the agent.")
 
 

@@ -36,11 +36,13 @@ class LangGraphAdapter(FrameworkAdapter):
         model_name: str = "gpt-4o-mini",
         model_provider: str = "openai",
         api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
     ):
         self.tools = tools or []
         self.model_name = model_name
         self.model_provider = model_provider
         self.api_key = api_key
+        self.base_url = base_url
         self._agent = None  # Cached agent graph
 
     def _build_agent(self):
@@ -52,7 +54,12 @@ class LangGraphAdapter(FrameworkAdapter):
             model = ChatOpenAI(model=self.model_name)
         elif self.model_provider == "anthropic":
             from langchain_anthropic import ChatAnthropic
-            model = ChatAnthropic(model=self.model_name)
+            kwargs: Dict[str, Any] = {"model": self.model_name}
+            if self.api_key:
+                kwargs["anthropic_api_key"] = self.api_key
+            if self.base_url:
+                kwargs["anthropic_api_url"] = self.base_url
+            model = ChatAnthropic(**kwargs)
         elif self.model_provider == "google":
             from langchain_google_genai import ChatGoogleGenerativeAI
             kwargs: Dict[str, Any] = {"model": self.model_name}

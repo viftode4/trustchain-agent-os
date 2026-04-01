@@ -16,7 +16,8 @@ Phases:
   3. Sybil attack — sybil floods with bad results
   4. Detection — trust reveals the attacker
 
-Run: GEMINI_API_KEY=... python examples/agent_marketplace.py
+Run: python examples/agent_marketplace.py
+     (uses local Claude API proxy at http://127.0.0.1:8082)
 """
 import asyncio
 import os
@@ -26,26 +27,25 @@ from agent_os import TrustAgent, TrustContext
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_KEY:
-    print("Error: GEMINI_API_KEY not set.")
-    print("  export GEMINI_API_KEY=your-key-here")
-    sys.exit(1)
+PROXY_URL = os.environ.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8082")
+MODEL = os.environ.get("CLAUDE_MODEL", "haiku")
 
-os.environ["GOOGLE_API_KEY"] = GEMINI_KEY
-MODEL = "gemini-2.5-flash"
+# litellm-based frameworks read these env vars
+os.environ.setdefault("ANTHROPIC_API_KEY", "proxy")
+os.environ.setdefault("ANTHROPIC_API_BASE", PROXY_URL)
+os.environ.setdefault("ANTHROPIC_BASE_URL", PROXY_URL)
 
 # ── Build framework agents with distinct personas ────────────────────────────
 
 client = TrustAgent(name="client")
 
-# Verifier agent — uses PydanticAI to check code quality
+# Verifier agent — uses Claude via proxy to check code quality
 _verifier_adapter = None
 try:
-    from tc_frameworks.adapters.pydantic_ai_adapter import PydanticAIAdapter
-    _verifier_adapter = PydanticAIAdapter(
-        model=f"google-gla:{MODEL}",
-        system_prompt=(
+    from tc_frameworks.adapters.claude_agent_adapter import ClaudeAgentAdapter
+    _verifier_adapter = ClaudeAgentAdapter(
+        model=MODEL, base_url=PROXY_URL, api_key="proxy",
+        instructions=(
             "You are a code reviewer. You receive a task and a code solution. "
             "Determine if the code correctly solves the task. "
             "Answer with exactly 'CORRECT' or 'INCORRECT' on the first line, "
@@ -64,7 +64,7 @@ async def verify_code(task: str, code: str) -> tuple[bool, str]:
     prompt = f"Task: {task}\n\nCode:\n{code}\n\nIs this correct?"
     tool_name = _verifier_adapter.get_tool_names()[0]
     result = await _verifier_mcp.call_tool(tool_name, {"message": prompt})
-    text = result.content[0].text if result.content else ""
+    text = result.content[0].text if result and result.content else ""
     correct = text.upper().startswith("CORRECT")
     return correct, text[:100]
 
@@ -76,7 +76,7 @@ coders: dict[str, TrustAgent] = {}
 
 print("Agent Marketplace Demo")
 print("=" * 70)
-print(f"LLM backend: Gemini ({MODEL}) for all agents")
+print(f"LLM backend: Claude ({MODEL}) via proxy at {PROXY_URL}")
 print()
 print("Loading framework agents...")
 
@@ -104,25 +104,24 @@ def register_coder(name, framework, persona, adapter, mcp, is_sybil=False):
     return agent
 
 
-# 1. Google ADK — reliable expert
+# 1. Claude (Anthropic) — reliable expert
 try:
-    from tc_frameworks.adapters.google_adk_adapter import GoogleADKAdapter
-    _a = GoogleADKAdapter(
-        agent_name="gemini_coder", model=MODEL,
-        instruction="You are an expert Python coder. Write correct, clean, concise code. "
-                    "Just the code, no explanation. Max 8 lines.",
+    _a = ClaudeAgentAdapter(
+        model=MODEL, base_url=PROXY_URL, api_key="proxy",
+        instructions="You are an expert Python coder. Write correct, clean, concise code. "
+                     "Just the code, no explanation. Max 8 lines.",
     )
     _m = _a.create_mcp_server()
-    register_coder("gemini_coder", "Google ADK", "Expert coder", _a, _m)
-    print(f"  gemini_coder:    Google ADK ........... LOADED")
+    register_coder("claude_coder", "Claude (Anthropic)", "Expert coder", _a, _m)
+    print(f"  claude_coder:    Claude (Anthropic) ... LOADED")
 except Exception as e:
-    register_coder("gemini_coder", "Google ADK", "Expert coder", None, None)
-    print(f"  gemini_coder:    Google ADK ........... SKIP ({e})")
+    register_coder("claude_coder", "Claude (Anthropic)", "Expert coder", None, None)
+    print(f"  claude_coder:    Claude (Anthropic) ... SKIP ({e})")
 
 # 2. LangGraph — systematic
 try:
     from tc_frameworks.adapters.langgraph_adapter import LangGraphAdapter
-    _a = LangGraphAdapter(model_name=MODEL, model_provider="google", api_key=GEMINI_KEY)
+    _a = LangGraphAdapter(model_name=MODEL, model_provider="anthropic", api_key="proxy", base_url=PROXY_URL)
     _m = _a.create_mcp_server()
     register_coder("langgraph_coder", "LangGraph", "Systematic coder", _a, _m)
     print(f"  langgraph_coder: LangGraph ............ LOADED")
@@ -132,8 +131,9 @@ except Exception as e:
 
 # 3. PydanticAI — precise
 try:
+    from tc_frameworks.adapters.pydantic_ai_adapter import PydanticAIAdapter
     _a = PydanticAIAdapter(
-        model=f"google-gla:{MODEL}",
+        model=f"anthropic:{MODEL}",
         system_prompt="You are a precise Python coder. Write correct, well-typed code. "
                       "Just the code, no explanation. Max 8 lines.",
     )
@@ -148,8 +148,8 @@ except Exception as e:
 try:
     from tc_frameworks.adapters.agno_adapter import AgnoAdapter
     _a = AgnoAdapter(
-        agent_name="sloppy", model_provider="google",
-        model_id=MODEL, api_key=GEMINI_KEY,
+        agent_name="sloppy", model_provider="anthropic",
+        model_id=MODEL, api_key="proxy", base_url=PROXY_URL,
         instructions="You are a rushed coder who often makes mistakes. Write code that looks "
                      "plausible but may have subtle bugs like off-by-one errors, wrong edge cases, "
                      "or missing base cases. Just code, no explanation.",
@@ -165,7 +165,7 @@ except Exception as e:
 try:
     from tc_frameworks.adapters.smolagents_adapter import SmolagentsAdapter
     _a = SmolagentsAdapter(
-        model_id=f"gemini/{MODEL}", model_type="litellm", api_key=GEMINI_KEY,
+        model_id=f"anthropic/{MODEL}", model_type="litellm",
         agent_type="tool_calling",
     )
     _m = _a.create_mcp_server()

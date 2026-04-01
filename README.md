@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/trustchain-agent-os.svg)](https://pypi.org/project/trustchain-agent-os/)
 [![CI](https://github.com/viftode4/trustchain-agent-os/actions/workflows/ci.yml/badge.svg)](https://github.com/viftode4/trustchain-agent-os/actions)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 **Trust-native protocol layer for AI agents.**
 
@@ -326,4 +326,4 @@ Built on [draft-pouwelse-trustchain-01](https://datatracker.ietf.org/doc/draft-p
 
 ## License
 
-MIT
+Apache-2.0

@@ -6,7 +6,8 @@ TrustChain works identically regardless of which framework the agent uses.
 
 This is the "USB-C of trust" demo: plug any framework in, trust works.
 
-Run: GEMINI_API_KEY=... python examples/framework_interop.py
+Run: python examples/framework_interop.py
+     (uses local Claude API proxy at http://127.0.0.1:8082)
 """
 import asyncio
 import os
@@ -16,20 +17,17 @@ from agent_os import TrustAgent, TrustContext
 
 # ── API setup ────────────────────────────────────────────────────────────────
 
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_KEY:
-    print("Error: GEMINI_API_KEY not set.")
-    print("  export GEMINI_API_KEY=your-key-here")
-    sys.exit(1)
+PROXY_URL = os.environ.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8082")
+MODEL = os.environ.get("CLAUDE_MODEL", "haiku")
 
-os.environ["GOOGLE_API_KEY"] = GEMINI_KEY
-
-# Spread across models — free tier = 20 RPD per model per project
-MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-lite"]
+# litellm-based frameworks read these env vars
+os.environ.setdefault("ANTHROPIC_API_KEY", "proxy")
+os.environ.setdefault("ANTHROPIC_API_BASE", PROXY_URL)
+os.environ.setdefault("ANTHROPIC_BASE_URL", PROXY_URL)
 
 
 def model_for(idx: int) -> str:
-    return MODELS[idx % len(MODELS)]
+    return MODEL
 
 
 # ── Build real framework agents ──────────────────────────────────────────────
@@ -49,13 +47,31 @@ def build_framework_agents() -> list[tuple[str, str, object]]:
         except Exception as e:
             print(f"  {name:>17}: {display:<24s} SKIP ({e})")
 
-    # 1. LangGraph
+    # 1. Claude (Anthropic) — direct SDK
+    def build_claude(i):
+        from tc_frameworks.adapters.claude_agent_adapter import ClaudeAgentAdapter
+        return ClaudeAgentAdapter(
+            model=MODEL, base_url=PROXY_URL, api_key="proxy",
+            instructions="You are a helpful assistant. Respond concisely in 2-3 sentences.",
+        )
+    try_load("claude", "Claude (Anthropic)", build_claude)
+
+    # 2. LangGraph — via langchain-anthropic
     def build_langgraph(i):
         from tc_frameworks.adapters.langgraph_adapter import LangGraphAdapter
-        return LangGraphAdapter(model_name=model_for(i), model_provider="google", api_key=GEMINI_KEY)
+        return LangGraphAdapter(model_name=MODEL, model_provider="anthropic", api_key="proxy", base_url=PROXY_URL)
     try_load("langgraph", "LangGraph", build_langgraph)
 
-    # 2. CrewAI
+    # 3. PydanticAI — anthropic provider
+    def build_pydantic(i):
+        from tc_frameworks.adapters.pydantic_ai_adapter import PydanticAIAdapter
+        return PydanticAIAdapter(
+            model=f"anthropic:{MODEL}",
+            system_prompt="You are a helpful assistant. Respond concisely in 2-3 sentences.",
+        )
+    try_load("pydantic_ai", "PydanticAI", build_pydantic)
+
+    # 4. CrewAI — via litellm anthropic provider
     def build_crewai(i):
         from tc_frameworks.adapters.crewai_adapter import CrewAIAdapter
         return CrewAIAdapter(
@@ -63,98 +79,57 @@ def build_framework_agents() -> list[tuple[str, str, object]]:
                 "agents": [{"role": "Assistant", "goal": "Help with tasks", "backstory": "Expert assistant"}],
                 "tasks": [{"description": "{message}", "expected_output": "A helpful response", "agent_role": "Assistant"}],
             },
-            llm_model=f"gemini/{model_for(i)}", llm_api_key=GEMINI_KEY,
+            llm_model=f"anthropic/{MODEL}",
         )
     try_load("crewai", "CrewAI", build_crewai)
 
-    # 3. OpenAI Agents SDK (via Gemini OpenAI-compatible endpoint)
-    def build_openai(i):
-        from tc_frameworks.adapters.openai_agents_adapter import OpenAIAgentsAdapter
-        import openai
-        from agents import OpenAIChatCompletionsModel
-        client = openai.AsyncOpenAI(
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-            api_key=GEMINI_KEY,
-        )
-        oai_model = OpenAIChatCompletionsModel(model=model_for(i), openai_client=client)
-        return OpenAIAgentsAdapter(
-            agent_name="openai_gemini", model=oai_model,
-            instructions="You are a helpful assistant. Respond concisely in 2-3 sentences.",
-        )
-    try_load("openai_agents", "OpenAI Agents SDK", build_openai)
-
-    # 4. Google ADK
-    def build_adk(i):
-        from tc_frameworks.adapters.google_adk_adapter import GoogleADKAdapter
-        return GoogleADKAdapter(
-            agent_name="adk_agent", model=model_for(i),
-            instruction="You are a helpful assistant. Respond concisely in 2-3 sentences.",
-        )
-    try_load("google_adk", "Google ADK", build_adk)
-
-    # 5. AutoGen/AG2
-    def build_autogen(i):
-        from tc_frameworks.adapters.autogen_adapter import AutoGenAdapter
-        return AutoGenAdapter(
-            agents_config=[{"name": "assistant", "system_message": "You are a helpful assistant. Respond concisely."}],
-            llm_config={"model": model_for(i), "api_type": "google", "api_key": GEMINI_KEY},
-        )
-    try_load("autogen", "AutoGen/AG2", build_autogen)
-
-    # 6. Claude (Anthropic SDK — uses real Anthropic API, not Gemini)
-    def build_claude(i):
-        from tc_frameworks.adapters.claude_agent_adapter import ClaudeAgentAdapter
-        return ClaudeAgentAdapter(
-            model="claude-haiku-4-5-20251001",
-            instructions="You are a helpful assistant. Respond concisely in 2-3 sentences.",
-        )
-    try_load("claude", "Claude (Anthropic)", build_claude)
-
-    # 7. Smolagents
+    # 5. Smolagents — via litellm anthropic provider
     def build_smolagents(i):
         from tc_frameworks.adapters.smolagents_adapter import SmolagentsAdapter
         return SmolagentsAdapter(
-            model_id=f"gemini/{model_for(i)}", model_type="litellm", api_key=GEMINI_KEY,
+            model_id=f"anthropic/{MODEL}", model_type="litellm",
         )
     try_load("smolagents", "Smolagents (HF)", build_smolagents)
 
-    # 8. PydanticAI
-    def build_pydantic(i):
-        from tc_frameworks.adapters.pydantic_ai_adapter import PydanticAIAdapter
-        return PydanticAIAdapter(
-            model=f"google-gla:{model_for(i)}",
-            system_prompt="You are a helpful assistant. Respond concisely in 2-3 sentences.",
-        )
-    try_load("pydantic_ai", "PydanticAI", build_pydantic)
-
-    # 9. Semantic Kernel
-    def build_sk(i):
-        from tc_frameworks.adapters.semantic_kernel_adapter import SemanticKernelAdapter
-        return SemanticKernelAdapter(
-            service_id="chat", model=model_for(i), provider="google", api_key=GEMINI_KEY,
-        )
-    try_load("semantic_kernel", "Semantic Kernel", build_sk)
-
-    # 10. Agno
+    # 6. Agno — anthropic provider
     def build_agno(i):
         from tc_frameworks.adapters.agno_adapter import AgnoAdapter
         return AgnoAdapter(
-            agent_name="agno_agent", model_provider="google",
-            model_id=model_for(i), api_key=GEMINI_KEY,
+            agent_name="agno_agent", model_provider="anthropic",
+            model_id=MODEL, api_key="proxy", base_url=PROXY_URL,
             instructions="You are a helpful assistant. Respond concisely in 2-3 sentences.",
         )
     try_load("agno", "Agno", build_agno)
 
-    # 11. LlamaIndex
+    # 7. AutoGen/AG2 — via litellm anthropic provider
+    def build_autogen(i):
+        from tc_frameworks.adapters.autogen_adapter import AutoGenAdapter
+        return AutoGenAdapter(
+            agents_config=[{"name": "assistant", "system_message": "You are a helpful assistant. Respond concisely."}],
+            llm_config={"model": f"anthropic/{MODEL}", "api_type": "anthropic"},
+        )
+    try_load("autogen", "AutoGen/AG2", build_autogen)
+
+    # 8. Semantic Kernel
+    def build_sk(i):
+        from tc_frameworks.adapters.semantic_kernel_adapter import SemanticKernelAdapter
+        return SemanticKernelAdapter(
+            service_id="chat", model=MODEL, provider="anthropic",
+        )
+    try_load("semantic_kernel", "Semantic Kernel", build_sk)
+
+    # 9. LlamaIndex
     def build_llamaindex(i):
         from tc_frameworks.adapters.llamaindex_adapter import LlamaIndexAdapter
         return LlamaIndexAdapter(
-            model=f"models/{model_for(i)}", provider="google", api_key=GEMINI_KEY,
+            model=MODEL, provider="anthropic",
             system_prompt="You are a helpful assistant. Respond concisely in 2-3 sentences.",
         )
     try_load("llamaindex", "LlamaIndex", build_llamaindex)
 
-    # 12. ElizaOS (REST bridge — needs running ElizaOS server)
+    # 10-12. Skipped (need separate servers/keys)
+    print(f"  {'openai_agents':>17}: {'OpenAI Agents SDK':<24s} SKIP (needs OpenAI key)")
+    print(f"  {'google_adk':>17}: {'Google ADK':<24s} SKIP (needs Gemini key)")
     print(f"  {'elizaos':>17}: {'ElizaOS':<24s} SKIP (needs running server)")
 
     return results
@@ -192,7 +167,7 @@ TASKS = [
 async def main():
     print("Framework Interop Demo — The USB-C of Trust")
     print("=" * 70)
-    print(f"LLM: Gemini (spread across {len(MODELS)} models to manage quota)")
+    print(f"LLM: Claude ({MODEL}) via proxy at {PROXY_URL}")
     print("Loading real framework adapters...")
     print()
 
@@ -248,7 +223,7 @@ async def main():
               f"{trust:.3f} {bar:<25} ({interactions} interactions)")
 
     print()
-    print("Every agent used its REAL framework runtime with Gemini as the LLM.")
+    print("Every agent used its REAL framework runtime with Claude as the LLM.")
     print("Trust scores are framework-agnostic — same bilateral ledger for all.")
     print()
     print("TrustChain: the trust layer UNDERNEATH all agent frameworks.")
