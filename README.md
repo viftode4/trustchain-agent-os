@@ -4,9 +4,11 @@
 [![CI](https://github.com/viftode4/trustchain-agent-os/actions/workflows/ci.yml/badge.svg)](https://github.com/viftode4/trustchain-agent-os/actions)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-**Trust-native protocol layer for AI agents.**
+**Gateway and adapter layer for TrustChain-powered agent networks.**
 
-Every agent protocol (MCP, A2A, ACP, ANP) handles communication. None handle trust. TrustChain Agent OS is the missing layer underneath all of them — a gateway and a set of framework adapters that bring bilateral signed interaction records, MeritRank Sybil resistance, and automatic trust scoring to 12 major agent frameworks. 222 tests.
+Every agent protocol handles communication in its own way. TrustChain Agent OS is the integration wedge that attaches portable identity, bilateral signed interaction history, delegation evidence, audit-friendly records, and trust-aware policy to existing agent stacks through a FastAPI gateway and 12 framework adapters. 192 tests.
+
+Trust scores and Sybil resistance are important applications of that substrate, but they are not the whole story. The same interaction record layer can drive delegated execution, discovery, routing, compliance, and cross-framework coordination.
 
 > **[Read the full TrustChain overview →](docs/TRUSTCHAIN-OVERVIEW.md)** — what it is, how it works, and why it matters.
 
@@ -98,7 +100,7 @@ Every tool call arriving at the gateway is checked against the caller's trust sc
 
 ## Framework Adapters
 
-Each adapter wraps a framework's native agent/crew/graph abstraction to add TrustChain identity and bilateral interaction recording. Adapters share a common interface through `tc_frameworks.base.TrustChainAdapter`.
+Each adapter wraps a framework's native agent/crew/graph abstraction as a FastMCP server. TrustChain identity, bilateral interaction recording, and trust scoring are applied by the **gateway middleware** when the adapter is mounted. Adapters share a common interface through `tc_frameworks.base.FrameworkAdapter`.
 
 ### LangGraph
 
@@ -250,7 +252,7 @@ trustchain-agent-os/
 │   └── trust_tools.py    MCP tool wrappers with trust metadata
 │
 ├── tc_frameworks/
-│   ├── base.py           TrustChainAdapter base class
+│   ├── base.py           FrameworkAdapter base class
 │   ├── adapters/         Real framework adapters (12)
 │   │   ├── langgraph_adapter.py
 │   │   ├── crewai_adapter.py
@@ -320,9 +322,10 @@ Built on [draft-pouwelse-trustchain-01](https://datatracker.ietf.org/doc/draft-p
 
 ## Related Projects
 
-- [trustchain](https://github.com/viftode4/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 304 tests
-- [trustchain-py](https://github.com/viftode4/trustchain-py) — Python SDK: zero-config `trustchain.init()`, full protocol bindings, 311 tests
-- [trustchain-js](https://github.com/viftode4/trustchain-js) — TypeScript SDK: `npm install @trustchain/sdk`, zero runtime deps, 126 tests
+- [trustchain](https://github.com/viftode4/trustchain) — Rust node: production sidecar binary, 4 crates, QUIC P2P, MCP server, 523 tests
+- [trustchain-py](https://github.com/viftode4/trustchain-py) — Python SDK: zero-config `trustchain.init()`, full protocol bindings, 475 tests
+- [trustchain-js](https://github.com/viftode4/trustchain-js) — TypeScript SDK: `npm install @trustchain/sdk`, zero runtime deps, 165 tests
+- [trustchain-economy](https://github.com/viftode4/trustchain-economy) — mechanism-design and adversarial evaluation engine for agent networks
 
 ## License
 

@@ -14,7 +14,7 @@ pip install -e ".[all-frameworks]"  # install all optional framework SDKs
 ## Tests
 
 ```bash
-python -m pytest tests/ -x -q   # 205 tests
+python -m pytest tests/ -x -q   # 192 tests
 python -m pytest tests/ -x -q --co -q  # dry-run (list tests only)
 ```
 

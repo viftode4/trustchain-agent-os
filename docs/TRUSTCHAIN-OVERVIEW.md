@@ -1,16 +1,16 @@
-# TrustChain: The Universal Trust Primitive for the Agent Economy
+# TrustChain: The Interaction Record and Coordination Layer for the Agent Economy
 
 ## What Is TrustChain?
 
-TrustChain is a **decentralized trust infrastructure** that lets any two parties — AI agents, humans, devices, services — interact with automatic, cryptographically verifiable trust. It is not a communication protocol, not a framework, and not a registry. It is the **missing trust layer** that sits underneath all of them.
+TrustChain is a **decentralized interaction-record infrastructure** that lets any two parties — AI agents, humans, devices, services — build portable, cryptographically verifiable history across systems. It is not a communication protocol, not a framework, and not a registry. It is the **missing coordination layer** that sits underneath all of them.
 
-Every agent protocol today (MCP, A2A, ACP, ANP) solves communication — how agents find each other, how they exchange messages, how they call tools. **None of them solve trust.** When Agent A calls Agent B, how does B know A is legitimate? How does A know B won't return garbage? Today the answer is API keys, OAuth tokens, and centralized allowlists — mechanisms designed for humans that completely break down in an autonomous agent economy where millions of agents interact without human oversight.
+Every agent protocol today (MCP, A2A, ACP, ANP) solves communication — how agents find each other, how they exchange messages, how they call tools. What they do not standardize is **portable bilateral interaction evidence**. When Agent A calls Agent B, how do both sides preserve a shared, tamper-evident record of what actually happened? How do identity, delegation, trust, audit, and routing reuse the same substrate instead of being rebuilt piecemeal? Today the answer is usually API keys, OAuth tokens, and centralized allowlists — mechanisms designed for humans that break down in an autonomous agent economy where agents interact without a single operator owning the graph.
 
-TrustChain replaces all of that with a single primitive: **bilateral signed interaction records on an append-only chain**, with Sybil resistance via max-flow graph analysis. No central authority. No shared secrets. No credential exchange. Two agents interact, both sign the interaction, trust accumulates over time, and the entire history is tamper-proof.
+TrustChain replaces all of that with a single primitive: **portable identity plus bilateral signed interaction records on an append-only chain**, with Sybil resistance via graph analysis. No central authority. No shared secrets. No credential exchange. Two agents interact, both sign the interaction, and the resulting history becomes the substrate for trust, delegation, discovery, audit, and policy.
 
 ## The Core Insight
 
-Trust is not a feature. It is **infrastructure**. Just as TCP/IP handles packet delivery so applications don't have to, TrustChain handles trust so agents don't have to. The agent doesn't call TrustChain — TrustChain runs as a **sidecar** (transparent proxy), intercepting normal HTTP calls and adding bilateral trust records invisibly. Set `HTTP_PROXY=localhost:8203` once, and every outbound call goes through the trust layer. The agent's code never changes.
+Trust is not a feature. It is **one important application of the infrastructure**. Just as TCP/IP handles packet delivery so applications don't have to, TrustChain handles interaction history so agents can derive trust, routing, and coordination from the same underlying records. The agent doesn't call TrustChain directly — TrustChain runs as a **sidecar** (transparent proxy), intercepting normal HTTP calls and adding bilateral records invisibly. Set `HTTP_PROXY=localhost:8203` once, and every outbound call goes through the interaction-record layer. The agent's code never changes.
 
 This means TrustChain works with **any** agent framework, **any** discovery mechanism, and **any** communication protocol. It doesn't matter if your agents use LangGraph, CrewAI, AutoGen, OpenAI Agents SDK, Google ADK, PydanticAI, Semantic Kernel, Agno, LlamaIndex, Smolagents, Claude, or ElizaOS. It doesn't matter if they discover each other via DNS, a registry, peer-to-peer gossip, or hardcoded URLs. Trust is always ground truth from the bilateral ledger.
 
@@ -125,7 +125,7 @@ The Python bindings for building trust-native applications.
 
 The integration layer that connects TrustChain to every major AI agent framework.
 
-- **205 tests passing**
+- **192 tests passing**
 - **12 framework adapters** (6 original + 6 new):
   - LangGraph, CrewAI, AutoGen/AG2, OpenAI Agents SDK, Google ADK, ElizaOS
   - Claude (Anthropic), Smolagents, PydanticAI, Semantic Kernel, Agno, LlamaIndex
@@ -197,11 +197,11 @@ An agent makes a decision that causes financial loss. Today: server logs are mut
 
 ## Project Status
 
-**Feature-complete.** All three repositories are production-hardened and tested:
+The core implementation surfaces are built, tested, and still actively evolving:
 
-- Rust node: 214 tests, TLS pubkey pinning, QUIC P2P, SQLite persistence, checkpoint protocol
-- Python SDK: 174 tests, wire-compatible with Rust, incremental NetFlow, delegation
-- Agent-OS: 205 tests, 12 framework adapters, trust gates, MCP gateway, sidecar integration
+- Rust node: 523 tests, TLS pubkey pinning, QUIC P2P, SQLite persistence, checkpoint protocol
+- Python SDK: 475 tests, wire-compatible with Rust, sidecar orchestration, delegation
+- Agent-OS: 192 tests, 12 framework adapters, trust gates, MCP gateway, sidecar integration
 
 **Verified working** (March 1, 2026):
 - hello_trust: bilateral trust accumulation with 1.000 chain integrity
