@@ -54,3 +54,5 @@ Thumbs.db
 # Rust
 trustchain-rs/target/
 trustchain-rs/test-nodes/
+.omc/
+.serena/
